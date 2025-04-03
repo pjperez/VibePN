@@ -29,7 +29,10 @@ func ConnectToPeers(
 	}
 
 	for _, p := range peers {
+		peer := p
+		logger.Infof("Launching goroutine to connect to peer: %s", peer.Name)
 		go func(peer config.Peer) {
+			logger.Infof("Started goroutine for peer %s (%s)", peer.Name, peer.Address)
 			logger.Infof("Connecting to %s (%s)", peer.Name, peer.Address)
 
 			tlsConf, err := crypto.LoadPeerTLSWithTOFU(peer.Name, peer.Address)

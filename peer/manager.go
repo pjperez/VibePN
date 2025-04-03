@@ -90,12 +90,18 @@ func ConnectToPeers(
 			logger.Infof(">>> Preparing to send route announcements using fingerprint: %s", identity.Fingerprint)
 
 			for name, net := range netcfg {
+				if !net.Export {
+					logger.Infof("Skipping network %s (export = false)", name)
+					continue
+				}
+
 				route := control.Route{
 					Prefix:    net.Prefix,
 					PeerID:    identity.Fingerprint,
 					Metric:    1,
 					ExpiresIn: 30,
 				}
+
 				logger.Infof("Announcing route for network=%s prefix=%s", name, net.Prefix)
 				control.SendRouteAnnounce(conn, name, []control.Route{route}, logger)
 			}

@@ -21,6 +21,9 @@ func ConnectToPeers(
 ) {
 	logger := log.New("peer/manager")
 
+	logger.Infof("identity.Fingerprint = %q", identity.Fingerprint)
+	logger.Infof("netcfg contents: %+v", netcfg)
+
 	if identity.Fingerprint == "" {
 		logger.Warnf("Local identity has no fingerprint set — route announcements may fail")
 	}
@@ -87,8 +90,8 @@ func ConnectToPeers(
 					Metric:    1,
 					ExpiresIn: 30,
 				}
+				logger.Infof("Announcing route for network=%s prefix=%s", name, net.Prefix)
 				control.SendRouteAnnounce(conn, name, []control.Route{route}, logger)
-				logger.Infof("Announced route for network=%s prefix=%s", name, net.Prefix)
 			}
 		}(p)
 	}

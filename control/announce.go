@@ -18,11 +18,11 @@ type Route struct {
 }
 
 func SendRouteAnnounce(conn quic.Connection, network string, routes []Route, logger *log.Logger) {
-	logger.Infof("Sending route-announce: network=%s, routes=%v", network, routes)
+	logger.Infof(">>> Sending route-announce to peer for network=%s, routes=%v", network, routes)
 
 	stream, err := conn.OpenStream()
 	if err != nil {
-		logger.Errorf("Failed to open route-announce stream: %v", err)
+		logger.Errorf("Failed to open stream for route-announce: %v", err)
 		return
 	}
 	defer stream.Close()
@@ -44,7 +44,7 @@ func SendRouteAnnounce(conn quic.Connection, network string, routes []Route, log
 		return
 	}
 
-	logger.Infof("Sent route-announce for %s (%d entries)", network, len(routes))
+	logger.Infof("<<< Sent route-announce for %s (%d entries)", network, len(routes))
 }
 
 func HandleRouteAnnounce(network string, routes []Route, rt *netgraph.RouteTable, logger *log.Logger) {

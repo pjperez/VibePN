@@ -6,98 +6,100 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+
 	"vibepn/log"
 )
 
 var (
 	tofuPath  = filepath.Join(os.Getenv("HOME"), ".vibepn", "known_peers.json")
+	tofuStore = make(map[string]string) // peerName → fingerprint
 	tofuMu    sync.Mutex
-	tofuCache map[string]string // peerName → fingerprint
 )
 
-func LoadPeerTLSWithTOFU(peerName, address string) (*tls.Config, error) {
-	logger := log.New("crypto/tofu")
+func init() {
+	loadTOFU()
+}
 
-	if err := loadTOFU(); err != nil {
-		return nil, err
+func loadTOFU() {
+	tofuMu.Lock()
+	defer tofuMu.Unlock()
+
+	data, err := os.ReadFile(tofuPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return // no file yet
+		}
+		log.New("crypto/tofu").Warnf("Failed to load TOFU store: %v", err)
+		return
+	}
+	err = json.Unmarshal(data, &tofuStore)
+	if err != nil {
+		log.New("crypto/tofu").Warnf("Failed to parse TOFU store: %v", err)
+	}
+}
+
+func saveTOFU() {
+	tofuMu.Lock()
+	defer tofuMu.Unlock()
+
+	dir := filepath.Dir(tofuPath)
+	_ = os.MkdirAll(dir, 0700)
+
+	data, err := json.MarshalIndent(tofuStore, "", "  ")
+	if err != nil {
+		log.New("crypto/tofu").Errorf("Failed to encode TOFU store: %v", err)
+		return
 	}
 
+	err = os.WriteFile(tofuPath, data, 0600)
+	if err != nil {
+		log.New("crypto/tofu").Errorf("Failed to save TOFU store: %v", err)
+	}
+}
+
+func LoadPeerTLSWithTOFU(peerName string, address string) (*tls.Config, error) {
 	return &tls.Config{
-		InsecureSkipVerify: true,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return errors.New("no peer certificate presented")
-			}
-
-			cert, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return err
-			}
-
-			sum := sha256.Sum256(cert.Raw)
-			fingerprint := hex.EncodeToString(sum[:])
-
-			tofuMu.Lock()
-			defer tofuMu.Unlock()
-
-			known, ok := tofuCache[peerName]
-			if ok {
-				if known != fingerprint {
-					return fmt.Errorf("TOFU: fingerprint mismatch for peer %s\nexpected: %s\ngot:      %s",
-						peerName, known, fingerprint)
-				}
-				logger.Infof("TOFU: verified fingerprint for %s (%s)", peerName, address)
-			} else {
-				logger.Infof("TOFU: trusting first fingerprint for %s (%s)", peerName, address)
-				tofuCache[peerName] = fingerprint
-				if err := saveTOFU(); err != nil {
-					logger.Errorf("Failed to save TOFU database: %v", err)
-				}
-			}
-
-			return nil
-		},
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: verifyTOFU(peerName, address),
 	}, nil
 }
 
-func loadTOFU() error {
-	tofuMu.Lock()
-	defer tofuMu.Unlock()
+func verifyTOFU(peerName, address string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return fmt.Errorf("no peer certificate presented")
+		}
 
-	if tofuCache != nil {
+		cert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return fmt.Errorf("failed to parse peer certificate: %v", err)
+		}
+
+		fp := sha256.Sum256(cert.Raw)
+		peerFP := hex.EncodeToString(fp[:])
+		logger := log.New("crypto/tofu")
+
+		tofuMu.Lock()
+		defer tofuMu.Unlock()
+
+		pinned, ok := tofuStore[peerName]
+		if !ok {
+			// First-time trust
+			logger.Infof("TOFU: trusting first fingerprint for %s (%s)", peerName, address)
+			tofuStore[peerName] = peerFP
+			saveTOFU()
+			return nil
+		}
+
+		if pinned != peerFP {
+			return fmt.Errorf("TOFU: fingerprint mismatch for %s: got %s, expected %s", peerName, peerFP, pinned)
+		}
+
+		logger.Infof("TOFU: fingerprint matched for %s", peerName)
 		return nil
 	}
-
-	tofuCache = make(map[string]string)
-
-	file, err := os.ReadFile(tofuPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // empty file, not an error
-		}
-		return err
-	}
-
-	return json.Unmarshal(file, &tofuCache)
-}
-
-func saveTOFU() error {
-	tofuMu.Lock()
-	defer tofuMu.Unlock()
-
-	if err := os.MkdirAll(filepath.Dir(tofuPath), 0700); err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(tofuCache, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(tofuPath, data, 0600)
 }

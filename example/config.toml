@@ -1,0 +1,20 @@
+[identity]
+cert = "/etc/vibepn/certs/node1.crt"
+key  = "/etc/vibepn/certs/node1.key"
+fingerprint = "abcd1234ef567890abcd1234ef567890abcd1234ef567890abcd1234ef567890"
+
+[[peers]]
+name = "node2"
+address = "203.0.113.42:51820"
+fingerprint = "f00dbabe12345678deadbeef12345678f00dbabe12345678deadbeef12345678"
+networks = ["corp"]
+
+[networks.corp]
+prefix = "10.42.0.0/24"
+address = "auto"
+export = true
+
+[networks.local]
+prefix = "10.99.0.0/24"
+address = "auto"
+export = false

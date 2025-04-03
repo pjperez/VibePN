@@ -51,6 +51,8 @@ func AcceptLoop(
 				return
 			}
 
+			logger.Infof("Received valid hello from %s → NodeID: %s", conn.RemoteAddr(), peerID)
+
 			registry.Add(peerID, conn)
 			tracker.MarkAlive(peerID)
 			handleSession(conn, inbound)
@@ -91,6 +93,7 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 			return
 		}
 
+		logger.Infof("Accepted new stream from %s", sess.RemoteAddr())
 		go handleStream(stream, logger, inbound)
 	}
 }

@@ -2,6 +2,7 @@ package peer
 
 import (
 	"context"
+	"time"
 
 	"vibepn/config"
 	"vibepn/control"
@@ -24,16 +25,12 @@ func ConnectToPeers(
 	logger.Infof("identity.Fingerprint = %q", identity.Fingerprint)
 	logger.Infof("netcfg contents: %+v", netcfg)
 
-	if identity.Fingerprint == "" {
-		logger.Warnf("Local identity has no fingerprint set — route announcements may fail")
-	}
-
 	for _, p := range peers {
 		peer := p
 		logger.Infof("Launching goroutine to connect to peer: %s", peer.Name)
-		go func(peer config.Peer) {
+
+		go func() {
 			logger.Infof("Started goroutine for peer %s (%s)", peer.Name, peer.Address)
-			logger.Infof("Connecting to %s (%s)", peer.Name, peer.Address)
 
 			tlsConf, err := crypto.LoadPeerTLSWithTOFU(peer.Name, peer.Address)
 			if err != nil {
@@ -42,17 +39,16 @@ func ConnectToPeers(
 			}
 			logger.Infof("TLS config created for peer %s", peer.Name)
 
-			conn, err := quic.DialAddr(
-				context.Background(),
-				peer.Address,
-				tlsConf,
-				nil,
-			)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			logger.Infof("Dialing QUIC to %s...", peer.Address)
+			conn, err := quic.DialAddr(ctx, peer.Address, tlsConf, nil)
 			if err != nil {
-				logger.Errorf("Failed to connect to peer %s: %v", peer.Name, err)
+				logger.Errorf("❌ QUIC dial to %s failed: %v", peer.Address, err)
 				return
 			}
-			logger.Infof("QUIC connection established to %s", peer.Address)
+			logger.Infof("✅ QUIC connection established to %s", peer.Address)
 
 			registry.Add(peer.Fingerprint, conn)
 			logger.Infof("Added connection to registry for peer %s", peer.Name)
@@ -88,9 +84,10 @@ func ConnectToPeers(
 
 			logger.Infof("Sending hello to %s", peer.Name)
 			control.SendHello(conn, hello, logger)
+
 			go control.SendKeepalive(conn, logger)
 
-			logger.Infof("Preparing to send route announcements for %d networks using fingerprint: %s", len(netcfg), identity.Fingerprint)
+			logger.Infof(">>> Preparing to send route announcements using fingerprint: %s", identity.Fingerprint)
 
 			for name, net := range netcfg {
 				route := control.Route{
@@ -102,6 +99,6 @@ func ConnectToPeers(
 				logger.Infof("Announcing route for network=%s prefix=%s", name, net.Prefix)
 				control.SendRouteAnnounce(conn, name, []control.Route{route}, logger)
 			}
-		}(p)
+		}()
 	}
 }

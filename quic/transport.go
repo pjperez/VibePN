@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"vibepn/control"
 	"vibepn/forward"
@@ -69,7 +70,7 @@ func expectHello(conn quic.Connection) (string, error) {
 	dec := json.NewDecoder(stream)
 	var header control.Header
 	if err := dec.Decode(&header); err != nil {
-		return "", err
+		return "", fmt.Errorf("decode header: %w", err)
 	}
 	if header.Type != "hello" {
 		return "", errors.New("expected hello message")
@@ -77,7 +78,13 @@ func expectHello(conn quic.Connection) (string, error) {
 
 	var msg control.HelloMessage
 	if err := dec.Decode(&msg); err != nil {
-		return "", err
+		return "", fmt.Errorf("decode hello: %w", err)
+	}
+
+	// 💡 Handle the hello payload right here
+	log.New("quic/accept").Infof("Received hello from peer %s advertising %d networks", msg.NodeID, len(msg.Networks))
+	for _, n := range msg.Networks {
+		log.New("quic/accept").Infof("→ %s: %s", n.Name, n.Address)
 	}
 
 	return msg.NodeID, nil

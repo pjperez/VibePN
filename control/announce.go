@@ -18,20 +18,31 @@ type Route struct {
 }
 
 func SendRouteAnnounce(conn quic.Connection, network string, routes []Route, logger *log.Logger) {
+	logger.Infof("Sending route-announce: network=%s, routes=%v", network, routes)
+
 	stream, err := conn.OpenStream()
 	if err != nil {
-		logger.Warnf("Failed to open route-announce stream: %v", err)
+		logger.Errorf("Failed to open route-announce stream: %v", err)
 		return
 	}
 	defer stream.Close()
 
 	enc := json.NewEncoder(stream)
-	_ = enc.Encode(Header{Type: "route-announce"})
+
+	header := Header{Type: "route-announce"}
+	if err := enc.Encode(header); err != nil {
+		logger.Errorf("Failed to encode route-announce header: %v", err)
+		return
+	}
+
 	payload := map[string]interface{}{
 		"network": network,
 		"routes":  routes,
 	}
-	_ = enc.Encode(payload)
+	if err := enc.Encode(payload); err != nil {
+		logger.Errorf("Failed to encode route-announce payload: %v", err)
+		return
+	}
 
 	logger.Infof("Sent route-announce for %s (%d entries)", network, len(routes))
 }

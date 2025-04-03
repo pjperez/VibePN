@@ -40,6 +40,7 @@ func ConnectToPeers(
 				logger.Errorf("Failed to create TLS config for %s: %v", peer.Name, err)
 				return
 			}
+			logger.Infof("TLS config created for peer %s", peer.Name)
 
 			conn, err := quic.DialAddr(
 				context.Background(),
@@ -51,8 +52,10 @@ func ConnectToPeers(
 				logger.Errorf("Failed to connect to peer %s: %v", peer.Name, err)
 				return
 			}
+			logger.Infof("QUIC connection established to %s", peer.Address)
 
 			registry.Add(peer.Fingerprint, conn)
+			logger.Infof("Added connection to registry for peer %s", peer.Name)
 
 			hello := control.HelloMessage{
 				NodeID: identity.Fingerprint,
@@ -66,11 +69,13 @@ func ConnectToPeers(
 			}
 
 			for name := range netcfg {
+				logger.Infof("Resolving address for network: %s", name)
 				addr, err := config.ResolveAddressForNetwork(name, identity.Fingerprint, netcfg)
 				if err != nil {
 					logger.Warnf("Skipping network %s: %v", name, err)
 					continue
 				}
+				logger.Infof("Resolved address for %s: %s", name, addr)
 
 				hello.Networks = append(hello.Networks, struct {
 					Name    string `json:"name"`
@@ -81,6 +86,7 @@ func ConnectToPeers(
 				})
 			}
 
+			logger.Infof("Sending hello to %s", peer.Name)
 			control.SendHello(conn, hello, logger)
 			go control.SendKeepalive(conn, logger)
 

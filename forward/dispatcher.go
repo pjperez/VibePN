@@ -40,7 +40,7 @@ func (d *Dispatcher) Start(network string, dev *tun.Device) {
 			pkt := buf[:n]
 			dst := parseDstIP(pkt)
 			if dst == nil {
-				d.Logger.Warnf("[%s] Invalid IP packet", network)
+				d.Logger.Warnf("[%s] Invalid IP packet: first 8 bytes = % x", network, pkt[:min(8, len(pkt))])
 				continue
 			}
 
@@ -111,4 +111,11 @@ func (d *Dispatcher) lookupRoute(network, ip string) *netgraph.Route {
 		}
 	}
 	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

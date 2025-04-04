@@ -102,7 +102,8 @@ func ParseKeepalive(dec *json.Decoder, logger *log.Logger) {
 		logger.Warnf("Failed to decode keepalive payload: %v", err)
 		return
 	}
-	logger.Debugf("Received keepalive: %d", msg.Timestamp)
+
+	logger.Debugf("Parsed keepalive: timestamp=%d", msg.Timestamp)
 }
 
 func shouldSend(state *keepaliveState, minInterval time.Duration) bool {

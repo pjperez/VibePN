@@ -169,18 +169,8 @@ func debugStream(stream quic.Stream, label string) {
 }
 
 func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {
-	// ✅ NEW: read entire stream into memory first
-	buf, err := io.ReadAll(stream)
-	if err != nil {
-		logger.Warnf("Failed to read stream: %v", err)
-		_ = stream.Close()
-		return
-	}
-
-	r := bytes.NewReader(buf)
-
-	// Decode header
-	dec := json.NewDecoder(r)
+	// ✅ First decode just header
+	dec := json.NewDecoder(stream)
 	var h control.Header
 	if err := dec.Decode(&h); err != nil {
 		logger.Warnf("Failed to decode stream header: %v", err)
@@ -188,46 +178,62 @@ func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forwa
 		return
 	}
 
-	handleDecodedStream(r, h, logger, inbound)
+	logger.Infof("Decoded stream header type: %s", h.Type)
 
-	_ = stream.Close() // done processing
+	// 🔥 Handle raw streams differently
+	if h.Type == "raw" {
+		var rawHeader struct {
+			Network string `json:"network"`
+		}
+		if err := dec.Decode(&rawHeader); err != nil {
+			logger.Warnf("Failed to decode raw stream metadata: %v", err)
+			_ = stream.Close()
+			return
+		}
+		logger.Infof("Raw stream for network %s", rawHeader.Network)
+
+		if inbound != nil {
+			go inbound.HandleRawStream(stream, rawHeader.Network) // ✅ Pass original live stream
+		} else {
+			logger.Warnf("Inbound handler not configured, discarding raw stream")
+			stream.CancelRead(0)
+		}
+		return
+	}
+
+	// ✅ For non-raw streams: read all and process
+	buf, err := io.ReadAll(stream)
+	if err != nil {
+		logger.Warnf("Failed to read stream body: %v", err)
+		_ = stream.Close()
+		return
+	}
+	handleDecodedStream(buf, h, logger)
+
+	_ = stream.Close() // cleanup
 }
 
-func handleDecodedStream(r *bytes.Reader, h control.Header, logger *log.Logger, inbound *forward.Inbound) {
+func handleDecodedStream(data []byte, h control.Header, logger *log.Logger) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+
 	switch h.Type {
 	case "hello":
 		logger.Infof("Unexpected duplicate hello")
 
 	case "route-announce":
-		control.ParseRouteAnnounce(json.NewDecoder(r), logger)
+		control.ParseRouteAnnounce(dec, logger)
 
 	case "route-withdraw":
-		control.ParseRouteWithdraw(json.NewDecoder(r), logger)
+		control.ParseRouteWithdraw(dec, logger)
 
 	case "keepalive":
-		control.ParseKeepalive(json.NewDecoder(r), logger)
+		control.ParseKeepalive(dec, logger)
 
 	case "goodbye":
 		logger.Infof("Received goodbye")
 
 	case "metrics":
 		logger.Infof("Received metrics stream (not yet handled)")
-
-	case "raw":
-		var rawHeader struct {
-			Network string `json:"network"`
-		}
-		if err := json.NewDecoder(r).Decode(&rawHeader); err != nil {
-			logger.Warnf("Failed to decode raw stream metadata: %v", err)
-			return
-		}
-		logger.Infof("Raw stream for network %s", rawHeader.Network)
-
-		if inbound != nil {
-			// use original stream for raw (TODO if needed)
-		} else {
-			logger.Warnf("Inbound handler not configured, discarding raw stream")
-		}
 
 	default:
 		logger.Warnf("Unknown stream type: %s", h.Type)

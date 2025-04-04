@@ -51,12 +51,35 @@ func SendRouteAnnounce(conn quic.Connection, network string, routes []Route, log
 }
 
 func ParseRouteAnnounce(dec *json.Decoder, logger *log.Logger) {
-	var payload map[string]interface{}
+	var payload struct {
+		Network string  `json:"network"`
+		Routes  []Route `json:"routes"`
+	}
+
 	if err := dec.Decode(&payload); err != nil {
 		logger.Warnf("Failed to decode route-announce payload: %v", err)
 		return
 	}
-	logger.Infof("Received route announcement for network %v", payload["network"])
+
+	logger.Infof("Parsed route-announce: network=%s, routes=%d", payload.Network, len(payload.Routes))
+
+	rt := GetRouteTable()
+	if rt == nil {
+		logger.Warnf("RouteTable not initialized, ignoring route-announce")
+		return
+	}
+
+	for _, r := range payload.Routes {
+		rt.AddRoute(netgraph.Route{
+			Network:   payload.Network,
+			Prefix:    r.Prefix,
+			PeerID:    r.PeerID,
+			Metric:    r.Metric,
+			ExpiresAt: time.Now().Add(time.Duration(r.ExpiresIn) * time.Second),
+		})
+	}
+
+	logger.Infof("Applied %d routes for network %s", len(payload.Routes), payload.Network)
 }
 
 func ParseRouteWithdraw(dec *json.Decoder, logger *log.Logger) {

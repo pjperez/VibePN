@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
 
 	"vibepn/control"
 	"vibepn/forward"
@@ -52,8 +52,6 @@ func AcceptLoop(
 				return
 			}
 
-			logger.Infof("Received valid hello from %s → NodeID: %s", conn.RemoteAddr(), peerID)
-
 			registry.Add(peerID, conn)
 			tracker.MarkAlive(peerID)
 			handleSession(conn, inbound)
@@ -67,10 +65,12 @@ func expectHello(conn quic.Connection) (string, error) {
 		return "", err
 	}
 
+	debugStream(stream, "initial-hello")
+
 	dec := json.NewDecoder(stream)
 	var header control.Header
 	if err := dec.Decode(&header); err != nil {
-		return "", fmt.Errorf("decode header: %w", err)
+		return "", err
 	}
 	if header.Type != "hello" {
 		return "", errors.New("expected hello message")
@@ -78,13 +78,7 @@ func expectHello(conn quic.Connection) (string, error) {
 
 	var msg control.HelloMessage
 	if err := dec.Decode(&msg); err != nil {
-		return "", fmt.Errorf("decode hello: %w", err)
-	}
-
-	// 💡 Handle the hello payload right here
-	log.New("quic/accept").Infof("Received hello from peer %s advertising %d networks", msg.NodeID, len(msg.Networks))
-	for _, n := range msg.Networks {
-		log.New("quic/accept").Infof("→ %s: %s", n.Name, n.Address)
+		return "", err
 	}
 
 	return msg.NodeID, nil
@@ -100,9 +94,25 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 			return
 		}
 
-		logger.Infof("Accepted new stream from %s", sess.RemoteAddr())
+		debugStream(stream, "incoming")
+
 		go handleStream(stream, logger, inbound)
 	}
+}
+
+func debugStream(stream quic.Stream, label string) {
+	go func() {
+		buf := make([]byte, 1024)
+		n, err := stream.Read(buf)
+		if err != nil && err != io.EOF {
+			log.New("quic/debug").Warnf("[%s] Failed to read debug stream: %v", label, err)
+			return
+		}
+		peek := buf[:n]
+		log.New("quic/debug").Debugf("[%s] First %d bytes: %x", label, n, peek)
+		// Note: This does not cancel or interfere with the main decoder, but will consume the stream head
+		// Recommend for now to keep this on while debugging and restart streams if needed
+	}()
 }
 
 func handleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {

@@ -1,10 +1,11 @@
 package quic
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
 
 	"vibepn/control"
@@ -65,23 +66,37 @@ func expectHello(conn quic.Connection) (string, error) {
 		return "", err
 	}
 
-	debugStream(stream, "initial-hello")
+	buf := make([]byte, 4096)
+	n, err := stream.Read(buf)
+	if err != nil && err != io.EOF {
+		return "", fmt.Errorf("failed to read stream: %w", err)
+	}
 
-	dec := json.NewDecoder(stream)
+	rawData := buf[:n]
+	logger := log.New("quic/expecthello")
+	logger.Infof("[debug/expecthello] Raw data received (%d bytes):\n%s", len(rawData), string(rawData))
+
+	// Recreate a reader from the captured bytes
+	dec := json.NewDecoder(NewReplayableStream(rawData))
+
 	var header control.Header
 	if err := dec.Decode(&header); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to decode header: %w", err)
 	}
 	if header.Type != "hello" {
-		return "", errors.New("expected hello message")
+		return "", fmt.Errorf("expected hello message, got %s", header.Type)
 	}
 
 	var msg control.HelloMessage
 	if err := dec.Decode(&msg); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to decode hello message: %w", err)
 	}
 
 	return msg.NodeID, nil
+}
+
+func NewReplayableStream(data []byte) *bytes.Reader {
+	return bytes.NewReader(data)
 }
 
 func handleSession(sess quic.Connection, inbound *forward.Inbound) {
@@ -94,25 +109,27 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 			return
 		}
 
-		debugStream(stream, "incoming")
-
-		go handleStream(stream, logger, inbound)
+		go debugAndHandleStream(stream, logger, inbound)
 	}
 }
 
-func debugStream(stream quic.Stream, label string) {
-	go func() {
-		buf := make([]byte, 1024)
-		n, err := stream.Read(buf)
-		if err != nil && err != io.EOF {
-			log.New("quic/debug").Warnf("[%s] Failed to read debug stream: %v", label, err)
-			return
-		}
-		peek := buf[:n]
-		log.New("quic/debug").Debugf("[%s] First %d bytes: %x", label, n, peek)
-		// Note: This does not cancel or interfere with the main decoder, but will consume the stream head
-		// Recommend for now to keep this on while debugging and restart streams if needed
-	}()
+func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {
+	var peekBuf [512]byte
+
+	// Peek into the stream without consuming it
+	n, err := stream.Read(peekBuf[:])
+	if err != nil && err != io.EOF {
+		logger.Warnf("[debug] Failed to peek stream: %v", err)
+		_ = stream.Close()
+		return
+	}
+
+	log.New("quic/debug").Debugf("[incoming stream] First %d bytes: %q", n, peekBuf[:n])
+
+	// Reset stream position
+	stream = quic.NewRecvStream(quic.NewBufferedReadStream(bytes.NewReader(peekBuf[:n]), stream))
+
+	handleStream(stream, logger, inbound)
 }
 
 func handleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {

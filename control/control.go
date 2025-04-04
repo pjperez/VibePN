@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"vibepn/log"
 
@@ -28,16 +29,17 @@ func SendHello(conn quic.Connection, msg HelloMessage, logger *log.Logger) error
 	}
 
 	header := Header{Type: "hello"}
-	enc := json.NewEncoder(stream)
 
-	if err := enc.Encode(header); err != nil {
-		logger.Warnf("Failed to send hello header: %v", err)
-		stream.Close()
-		return err
-	}
+	// 🔥 DEBUG: Dump what we're about to send
+	headerBytes, _ := json.Marshal(header)
+	msgBytes, _ := json.Marshal(msg)
 
-	if err := enc.Encode(msg); err != nil {
-		logger.Warnf("Failed to send hello body: %v", err)
+	logger.Infof("[debug/sendhello] Header JSON: %s", string(headerBytes))
+	logger.Infof("[debug/sendhello] Body JSON:   %s", string(msgBytes))
+
+	// 🔥 DEBUG: Write manually and flush
+	if _, err := fmt.Fprintf(stream, "%s\n%s\n", string(headerBytes), string(msgBytes)); err != nil {
+		logger.Warnf("Failed to send hello: %v", err)
 		stream.Close()
 		return err
 	}

@@ -61,3 +61,27 @@ func HandleRouteAnnounce(network string, routes []Route, rt *netgraph.RouteTable
 	}
 	logger.Infof("Handled route-announce for %s (%d routes)", network, len(routes))
 }
+
+func ParseRouteAnnounce(stream quic.Stream, logger *log.Logger) {
+	defer stream.Close()
+
+	var payload struct {
+		Network string  `json:"network"`
+		Routes  []Route `json:"routes"`
+	}
+
+	dec := json.NewDecoder(stream)
+	if err := dec.Decode(&payload); err != nil {
+		logger.Warnf("Failed to decode route-announce payload: %v", err)
+		return
+	}
+
+	logger.Infof("✅ Parsed route-announce for network %s (%d routes)", payload.Network, len(payload.Routes))
+
+	rt := GetRouteTable()
+	if rt != nil {
+		HandleRouteAnnounce(payload.Network, payload.Routes, rt, logger)
+	} else {
+		logger.Warnf("No route table available, ignoring route-announce")
+	}
+}

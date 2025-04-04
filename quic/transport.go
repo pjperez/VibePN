@@ -182,13 +182,13 @@ func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forwa
 func handleDecodedStream(stream quic.Stream, h control.Header, logger *log.Logger, inbound *forward.Inbound) {
 	switch h.Type {
 	case "hello":
-		logger.Infof("Unexpected duplicate hello")
+		logger.Infof("Unexpected duplicate hello. Ignoring.")
 
 	case "route-announce":
-		control.ParseRouteAnnounce(json.NewDecoder(stream), logger)
+		control.ParseRouteAnnounce(stream, logger)
 
 	case "keepalive":
-		control.ParseKeepalive(json.NewDecoder(stream), logger)
+		control.ParseKeepalive(stream, logger)
 
 	case "route-withdraw":
 		var msg map[string]interface{}

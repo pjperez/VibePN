@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 
-	"vibepn/config"
 	"vibepn/control"
 	"vibepn/forward"
 	"vibepn/log"
@@ -59,41 +58,7 @@ func AcceptLoop(
 			registry.Add(peerID, conn)
 			tracker.MarkAlive(peerID)
 
-			// 🔥 NEW: Reply back with Hello
-			identity := registry.Identity()
-			netcfg := registry.NetConfig()
-
-			hello := control.HelloMessage{
-				NodeID: identity.Fingerprint,
-				Networks: []struct {
-					Name    string `json:"name"`
-					Address string `json:"address"`
-				}{},
-				Features: map[string]bool{
-					"metrics": true,
-				},
-			}
-
-			for name := range netcfg {
-				addr, err := config.ResolveAddressForNetwork(name, identity.Fingerprint, netcfg)
-				if err != nil {
-					logger.Warnf("Skipping network %s: %v", name, err)
-					continue
-				}
-				hello.Networks = append(hello.Networks, struct {
-					Name    string `json:"name"`
-					Address string `json:"address"`
-				}{
-					Name:    name,
-					Address: addr,
-				})
-			}
-
-			logger.Infof("Replying to peer %s with Hello", peerID)
-			if err := control.SendHello(conn, hello, logger); err != nil {
-				logger.Warnf("Failed to send hello reply to %s: %v", peerID, err)
-			}
-
+			// 🔥 After handshake, always enter session loop
 			handleSession(conn, inbound)
 		}(sess)
 	}
@@ -130,7 +95,48 @@ func expectHello(conn quic.Connection) (string, error) {
 		return "", fmt.Errorf("failed to decode hello message: %w", err)
 	}
 
+	// 🔥 After receiving hello, reply with our own hello
+	replyHello(conn, msg.NodeID)
+
 	return msg.NodeID, nil
+}
+
+func replyHello(conn quic.Connection, peerID string) {
+	logger := log.New("quic/accept")
+	logger.Infof("Replying to peer %s with Hello", peerID)
+
+	stream, err := conn.OpenStream()
+	if err != nil {
+		logger.Warnf("Failed to open stream for Hello reply: %v", err)
+		return
+	}
+	defer stream.Close()
+
+	header := control.Header{Type: "hello"}
+	body := control.HelloMessage{
+		NodeID: peerID, // <-- we could send our fingerprint, depending on design
+		Networks: []struct {
+			Name    string `json:"name"`
+			Address string `json:"address"`
+		}{},
+		Features: map[string]bool{
+			"metrics": true,
+		},
+	}
+
+	headerBytes, _ := json.Marshal(header)
+	bodyBytes, _ := json.Marshal(body)
+
+	logger.Infof("[debug/sendhello] Header JSON: %s", string(headerBytes))
+	logger.Infof("[debug/sendhello] Body JSON:   %s", string(bodyBytes))
+
+	_, err = fmt.Fprintf(stream, "%s\n%s\n", string(headerBytes), string(bodyBytes))
+	if err != nil {
+		logger.Warnf("Failed to send Hello reply: %v", err)
+		return
+	}
+
+	logger.Infof("Sent hello to peer: %s", peerID)
 }
 
 func NewReplayableStream(data []byte) *bytes.Reader {

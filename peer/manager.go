@@ -2,6 +2,7 @@ package peer
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"vibepn/config"
@@ -105,6 +106,64 @@ func ConnectToPeers(
 				logger.Infof("Announcing route for network=%s prefix=%s", name, net.Prefix)
 				control.SendRouteAnnounce(conn, name, []control.Route{route}, logger)
 			}
+
+			// 🔥 NEW: Handle incoming control streams on this connection
+			go func() {
+				logger := log.New("peer/session")
+				for {
+					stream, err := conn.AcceptStream(context.Background())
+					if err != nil {
+						logger.Warnf("Stream error from %s: %v", conn.RemoteAddr(), err)
+						return
+					}
+
+					go func(stream quic.Stream) {
+						var h control.Header
+						dec := json.NewDecoder(stream)
+						if err := dec.Decode(&h); err != nil {
+							logger.Warnf("Failed to decode stream header: %v", err)
+							_ = stream.Close()
+							return
+						}
+
+						switch h.Type {
+						case "hello":
+							logger.Infof("Unexpected duplicate hello")
+						case "route-announce":
+							var msg map[string]interface{}
+							if err := dec.Decode(&msg); err != nil {
+								logger.Warnf("Failed to decode route-announce: %v", err)
+								_ = stream.Close()
+								return
+							}
+							logger.Infof("Received route announcement for network %v", msg["network"])
+						case "route-withdraw":
+							var msg map[string]interface{}
+							if err := dec.Decode(&msg); err != nil {
+								logger.Warnf("Failed to decode route-withdraw: %v", err)
+								_ = stream.Close()
+								return
+							}
+							logger.Infof("Received route withdrawal for network %v", msg["network"])
+						case "keepalive":
+							var msg control.KeepaliveMessage
+							if err := dec.Decode(&msg); err != nil {
+								logger.Warnf("Failed to decode keepalive: %v", err)
+								_ = stream.Close()
+								return
+							}
+							logger.Debugf("Received keepalive: %d", msg.Timestamp)
+						case "goodbye":
+							logger.Infof("Received goodbye")
+						case "metrics":
+							logger.Infof("Received metrics stream (not yet handled)")
+						default:
+							logger.Warnf("Unknown stream type: %s", h.Type)
+							stream.CancelRead(0)
+						}
+					}(stream)
+				}
+			}()
 		}()
 	}
 }

@@ -66,19 +66,21 @@ func expectHello(conn quic.Connection) (string, error) {
 		return "", err
 	}
 
+	// 🔥 DEBUG: Dump raw bytes before decoding
 	buf := make([]byte, 4096)
 	n, err := stream.Read(buf)
-	if err != nil && err != io.EOF {
+	if err != nil {
 		return "", fmt.Errorf("failed to read stream: %w", err)
 	}
 
 	rawData := buf[:n]
 	logger := log.New("quic/expecthello")
-	logger.Infof("[debug/expecthello] Raw data received (%d bytes):\n%s", len(rawData), string(rawData))
+	logger.Infof("[debug/expecthello] Raw data received (%d bytes): %s", len(rawData), string(rawData))
 
-	// Recreate a reader from the captured bytes
+	// Re-create a new decoder from rawData
 	dec := json.NewDecoder(NewReplayableStream(rawData))
 
+	// Decode header
 	var header control.Header
 	if err := dec.Decode(&header); err != nil {
 		return "", fmt.Errorf("failed to decode header: %w", err)
@@ -87,6 +89,7 @@ func expectHello(conn quic.Connection) (string, error) {
 		return "", fmt.Errorf("expected hello message, got %s", header.Type)
 	}
 
+	// Decode body
 	var msg control.HelloMessage
 	if err := dec.Decode(&msg); err != nil {
 		return "", fmt.Errorf("failed to decode hello message: %w", err)
@@ -95,6 +98,7 @@ func expectHello(conn quic.Connection) (string, error) {
 	return msg.NodeID, nil
 }
 
+// NewReplayableStream returns a Reader from raw bytes
 func NewReplayableStream(data []byte) *bytes.Reader {
 	return bytes.NewReader(data)
 }
@@ -109,45 +113,46 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 			return
 		}
 
+		debugStream(stream, "incoming")
+
 		go debugAndHandleStream(stream, logger, inbound)
 	}
 }
 
-func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {
-	var peekBuf [512]byte
-
-	// Peek into the stream without consuming it
-	n, err := stream.Read(peekBuf[:])
-	if err != nil && err != io.EOF {
-		logger.Warnf("[debug] Failed to peek stream: %v", err)
-		_ = stream.Close()
-		return
-	}
-
-	log.New("quic/debug").Debugf("[incoming stream] First %d bytes: %q", n, peekBuf[:n])
-
-	// Reset stream position
-	stream = quic.NewRecvStream(quic.NewBufferedReadStream(bytes.NewReader(peekBuf[:n]), stream))
-
-	handleStream(stream, logger, inbound)
+func debugStream(stream quic.Stream, label string) {
+	go func() {
+		buf := make([]byte, 1024)
+		n, err := stream.Read(buf)
+		if err != nil && err != io.EOF {
+			log.New("quic/debug").Warnf("[%s] Failed to read debug stream: %v", label, err)
+			return
+		}
+		peek := buf[:n]
+		log.New("quic/debug").Debugf("[%s] First %d bytes: %x", label, n, peek)
+		// Note: This reads once; normal decoding continues after
+	}()
 }
 
-func handleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {
-	var h control.Header
+func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {
 	dec := json.NewDecoder(stream)
+	var h control.Header
 	if err := dec.Decode(&h); err != nil {
 		logger.Warnf("Failed to decode stream header: %v", err)
 		_ = stream.Close()
 		return
 	}
 
+	handleDecodedStream(stream, h, logger, inbound)
+}
+
+func handleDecodedStream(stream quic.Stream, h control.Header, logger *log.Logger, inbound *forward.Inbound) {
 	switch h.Type {
 	case "hello":
 		logger.Infof("Unexpected duplicate hello")
 
 	case "route-announce":
 		var msg map[string]interface{}
-		if err := dec.Decode(&msg); err != nil {
+		if err := json.NewDecoder(stream).Decode(&msg); err != nil {
 			logger.Warnf("Failed to decode route-announce: %v", err)
 			_ = stream.Close()
 			return
@@ -156,7 +161,7 @@ func handleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbou
 
 	case "route-withdraw":
 		var msg map[string]interface{}
-		if err := dec.Decode(&msg); err != nil {
+		if err := json.NewDecoder(stream).Decode(&msg); err != nil {
 			logger.Warnf("Failed to decode route-withdraw: %v", err)
 			_ = stream.Close()
 			return
@@ -165,7 +170,7 @@ func handleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbou
 
 	case "keepalive":
 		var msg control.KeepaliveMessage
-		if err := dec.Decode(&msg); err != nil {
+		if err := json.NewDecoder(stream).Decode(&msg); err != nil {
 			logger.Warnf("Failed to decode keepalive: %v", err)
 			_ = stream.Close()
 			return
@@ -182,7 +187,7 @@ func handleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbou
 		var rawHeader struct {
 			Network string `json:"network"`
 		}
-		if err := dec.Decode(&rawHeader); err != nil {
+		if err := json.NewDecoder(stream).Decode(&rawHeader); err != nil {
 			logger.Warnf("Failed to decode raw stream metadata: %v", err)
 			_ = stream.Close()
 			return

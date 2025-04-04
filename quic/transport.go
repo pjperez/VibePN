@@ -74,12 +74,12 @@ func expectHello(conn quic.Connection) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read stream: %w", err)
 	}
-
 	rawData := buf[:n]
+
 	logger := log.New("quic/expecthello")
 	logger.Infof("[debug/expecthello] Raw data received (%d bytes): %s", len(rawData), string(rawData))
 
-	dec := json.NewDecoder(NewReplayableStream(rawData))
+	dec := json.NewDecoder(bytes.NewReader(rawData))
 
 	var header control.Header
 	if err := dec.Decode(&header); err != nil {
@@ -144,10 +144,6 @@ func replyHello(conn quic.Connection) {
 	logger.Infof("Sent hello reply")
 }
 
-func NewReplayableStream(data []byte) *bytes.Reader {
-	return bytes.NewReader(data)
-}
-
 func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 	logger := log.New("quic/session")
 
@@ -169,19 +165,18 @@ func debugStream(stream quic.Stream, label string) {
 }
 
 func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {
-	// ✅ First decode just header
 	dec := json.NewDecoder(stream)
-	var h control.Header
-	if err := dec.Decode(&h); err != nil {
+
+	var header control.Header
+	if err := dec.Decode(&header); err != nil {
 		logger.Warnf("Failed to decode stream header: %v", err)
 		_ = stream.Close()
 		return
 	}
 
-	logger.Infof("Decoded stream header type: %s", h.Type)
+	logger.Infof("Decoded stream header type: %s", header.Type)
 
-	// 🔥 Handle raw streams differently
-	if h.Type == "raw" {
+	if header.Type == "raw" {
 		var rawHeader struct {
 			Network string `json:"network"`
 		}
@@ -193,7 +188,7 @@ func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forwa
 		logger.Infof("Raw stream for network %s", rawHeader.Network)
 
 		if inbound != nil {
-			go inbound.HandleRawStream(stream, rawHeader.Network) // ✅ Pass original live stream
+			go inbound.HandleRawStream(stream, rawHeader.Network) // Pass live stream
 		} else {
 			logger.Warnf("Inbound handler not configured, discarding raw stream")
 			stream.CancelRead(0)
@@ -201,22 +196,22 @@ func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forwa
 		return
 	}
 
-	// ✅ For non-raw streams: read all and process
+	// 🚀 Non-raw: fully buffer
 	buf, err := io.ReadAll(stream)
 	if err != nil {
 		logger.Warnf("Failed to read stream body: %v", err)
 		_ = stream.Close()
 		return
 	}
-	handleDecodedStream(buf, h, logger)
+	_ = stream.Close()
 
-	_ = stream.Close() // cleanup
+	handleDecodedStream(buf, header, logger)
 }
 
-func handleDecodedStream(data []byte, h control.Header, logger *log.Logger) {
+func handleDecodedStream(data []byte, header control.Header, logger *log.Logger) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 
-	switch h.Type {
+	switch header.Type {
 	case "hello":
 		logger.Infof("Unexpected duplicate hello")
 
@@ -236,6 +231,6 @@ func handleDecodedStream(data []byte, h control.Header, logger *log.Logger) {
 		logger.Infof("Received metrics stream (not yet handled)")
 
 	default:
-		logger.Warnf("Unknown stream type: %s", h.Type)
+		logger.Warnf("Unknown stream type: %s", header.Type)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 
 	"vibepn/control"
 	"vibepn/forward"
@@ -15,11 +16,64 @@ import (
 	"vibepn/peer"
 
 	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/logging"
 )
+
+// Minimal custom tracer so we can see handshake events in modern quic-go
+func newDebugTracer(logger *log.Logger) logging.Tracer {
+	return &debugTracer{logger: logger}
+}
+
+type debugTracer struct {
+	logger *log.Logger
+}
+
+// quic-go calls this for each new connection
+func (t *debugTracer) TracerForConnection(p logging.Perspective, odcid logging.ConnectionID) logging.ConnectionTracer {
+	t.logger.Infof("[quic/tracer] New connection, perspective=%v, odcid=%v", p, odcid)
+	return &debugConnTracer{logger: t.logger}
+}
+
+type debugConnTracer struct {
+	logger *log.Logger
+}
+
+// The following are partial methods from logging.ConnectionTracer
+// We show handshake phases. You can implement more if needed.
+
+// Called once the QUIC handshake starts
+func (c *debugConnTracer) StartedConnection(local, remote net.Addr, version logging.VersionNumber, srcConnID, destConnID logging.ConnectionID) {
+	c.logger.Infof("[quic/tracer] StartedConnection local=%v remote=%v version=%v srcConnID=%v destConnID=%v",
+		local, remote, version, srcConnID, destConnID)
+}
+
+func (c *debugConnTracer) NegotiatedVersion(chosen logging.VersionNumber, client logging.VersionNumber, server logging.VersionNumber) {
+	c.logger.Infof("[quic/tracer] NegotiatedVersion chosen=%v client=%v server=%v", chosen, client, server)
+}
+
+func (c *debugConnTracer) TLSHandshakeStart(_ logging.MessageDirection, _ logging.MessageType) {
+	c.logger.Infof("[quic/tracer] TLSHandshakeStart")
+}
+
+func (c *debugConnTracer) TLSHandshakeDone(ok bool, err error) {
+	c.logger.Infof("[quic/tracer] TLSHandshakeDone ok=%v err=%v", ok, err)
+}
+
+func (c *debugConnTracer) ClosedConnection(local logging.CloseReason) {
+	c.logger.Infof("[quic/tracer] ClosedConnection local=%v", local)
+}
+
+// We omit many other methods for brevity. If you need more, implement them similarly.
 
 func Listen(addr string, tlsConf *tls.Config) (*quic.Listener, error) {
 	logger := log.New("quic/listener")
-	ln, err := quic.ListenAddr(addr, tlsConf, nil)
+
+	// Inserted: create a quic.Config with our custom debug tracer
+	qconf := &quic.Config{
+		Tracer: newDebugTracer(logger),
+	}
+
+	ln, err := quic.ListenAddr(addr, tlsConf, qconf)
 	if err != nil {
 		return nil, err
 	}

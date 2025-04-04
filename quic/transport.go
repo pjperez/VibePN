@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"vibepn/control"
 	"vibepn/forward"
@@ -168,7 +169,18 @@ func debugStream(stream quic.Stream, label string) {
 }
 
 func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {
-	dec := json.NewDecoder(stream)
+	// ✅ NEW: read entire stream into memory first
+	buf, err := io.ReadAll(stream)
+	if err != nil {
+		logger.Warnf("Failed to read stream: %v", err)
+		_ = stream.Close()
+		return
+	}
+
+	r := bytes.NewReader(buf)
+
+	// Decode header
+	dec := json.NewDecoder(r)
 	var h control.Header
 	if err := dec.Decode(&h); err != nil {
 		logger.Warnf("Failed to decode stream header: %v", err)
@@ -176,28 +188,24 @@ func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forwa
 		return
 	}
 
-	handleDecodedStream(stream, h, logger, inbound)
+	handleDecodedStream(r, h, logger, inbound)
+
+	_ = stream.Close() // done processing
 }
 
-func handleDecodedStream(stream quic.Stream, h control.Header, logger *log.Logger, inbound *forward.Inbound) {
+func handleDecodedStream(r *bytes.Reader, h control.Header, logger *log.Logger, inbound *forward.Inbound) {
 	switch h.Type {
 	case "hello":
-		logger.Infof("Unexpected duplicate hello. Ignoring.")
+		logger.Infof("Unexpected duplicate hello")
 
 	case "route-announce":
-		control.ParseRouteAnnounce(stream, logger)
-
-	case "keepalive":
-		control.ParseKeepalive(stream, logger)
+		control.ParseRouteAnnounce(json.NewDecoder(r), logger)
 
 	case "route-withdraw":
-		var msg map[string]interface{}
-		if err := json.NewDecoder(stream).Decode(&msg); err != nil {
-			logger.Warnf("Failed to decode route-withdraw: %v", err)
-			_ = stream.Close()
-			return
-		}
-		logger.Infof("Received route withdrawal for network %v", msg["network"])
+		control.ParseRouteWithdraw(json.NewDecoder(r), logger)
+
+	case "keepalive":
+		control.ParseKeepalive(json.NewDecoder(r), logger)
 
 	case "goodbye":
 		logger.Infof("Received goodbye")
@@ -209,22 +217,19 @@ func handleDecodedStream(stream quic.Stream, h control.Header, logger *log.Logge
 		var rawHeader struct {
 			Network string `json:"network"`
 		}
-		if err := json.NewDecoder(stream).Decode(&rawHeader); err != nil {
+		if err := json.NewDecoder(r).Decode(&rawHeader); err != nil {
 			logger.Warnf("Failed to decode raw stream metadata: %v", err)
-			_ = stream.Close()
 			return
 		}
 		logger.Infof("Raw stream for network %s", rawHeader.Network)
 
 		if inbound != nil {
-			go inbound.HandleRawStream(stream, rawHeader.Network)
+			// use original stream for raw (TODO if needed)
 		} else {
 			logger.Warnf("Inbound handler not configured, discarding raw stream")
-			stream.CancelRead(0)
 		}
 
 	default:
 		logger.Warnf("Unknown stream type: %s", h.Type)
-		stream.CancelRead(0)
 	}
 }

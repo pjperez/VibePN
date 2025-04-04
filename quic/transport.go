@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 
+	"vibepn/config"
 	"vibepn/control"
 	"vibepn/forward"
 	"vibepn/log"
@@ -21,7 +22,6 @@ func Listen(addr string, tlsConf *tls.Config) (*quic.Listener, error) {
 	logger := log.New("quic/listener")
 	ln, err := quic.ListenAddr(addr, tlsConf, &quic.Config{
 		EnableDatagrams: true,
-		// no Tracer field, quic-go v0.50.1 doesn't have NewDefaultTracer
 	})
 	if err != nil {
 		return nil, err
@@ -58,6 +58,42 @@ func AcceptLoop(
 
 			registry.Add(peerID, conn)
 			tracker.MarkAlive(peerID)
+
+			// 🔥 NEW: Reply back with Hello
+			identity := registry.Identity()
+			netcfg := registry.NetConfig()
+
+			hello := control.HelloMessage{
+				NodeID: identity.Fingerprint,
+				Networks: []struct {
+					Name    string `json:"name"`
+					Address string `json:"address"`
+				}{},
+				Features: map[string]bool{
+					"metrics": true,
+				},
+			}
+
+			for name := range netcfg {
+				addr, err := config.ResolveAddressForNetwork(name, identity.Fingerprint, netcfg)
+				if err != nil {
+					logger.Warnf("Skipping network %s: %v", name, err)
+					continue
+				}
+				hello.Networks = append(hello.Networks, struct {
+					Name    string `json:"name"`
+					Address string `json:"address"`
+				}{
+					Name:    name,
+					Address: addr,
+				})
+			}
+
+			logger.Infof("Replying to peer %s with Hello", peerID)
+			if err := control.SendHello(conn, hello, logger); err != nil {
+				logger.Warnf("Failed to send hello reply to %s: %v", peerID, err)
+			}
+
 			handleSession(conn, inbound)
 		}(sess)
 	}

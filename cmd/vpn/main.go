@@ -44,9 +44,9 @@ func main() {
 	tracker := peer.NewLivenessTracker(30 * time.Second)
 	tracker.StartWatcher(routeTable)
 
-	registry := peer.NewRegistry()
+	registry := peer.NewRegistry(cfg.Identity, cfg.Networks)
 
-	// Register control with route-push and goodbye hooks
+	// Register control handlers
 	control.Register(routeTable, tracker, func(peerID, network string, route control.Route) {
 		conn := registry.Get(peerID)
 		if conn != nil {

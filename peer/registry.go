@@ -3,6 +3,7 @@ package peer
 import (
 	"sync"
 
+	"vibepn/config"
 	"vibepn/control"
 	"vibepn/log"
 
@@ -10,15 +11,19 @@ import (
 )
 
 type Registry struct {
-	mu     sync.RWMutex
-	conns  map[string]quic.Connection // peerID → connection
-	logger *log.Logger
+	mu       sync.RWMutex
+	conns    map[string]quic.Connection // peerID → connection
+	logger   *log.Logger
+	identity config.Identity
+	netcfg   map[string]config.NetworkConfig
 }
 
-func NewRegistry() *Registry {
+func NewRegistry(identity config.Identity, netcfg map[string]config.NetworkConfig) *Registry {
 	return &Registry{
-		conns:  make(map[string]quic.Connection),
-		logger: log.New("peer/registry"),
+		conns:    make(map[string]quic.Connection),
+		logger:   log.New("peer/registry"),
+		identity: identity,
+		netcfg:   netcfg,
 	}
 }
 
@@ -62,4 +67,12 @@ func (r *Registry) DisconnectAll() {
 		r.logger.Infof("Disconnected from peer %s", peerID)
 	}
 	r.conns = map[string]quic.Connection{}
+}
+
+func (r *Registry) Identity() config.Identity {
+	return r.identity
+}
+
+func (r *Registry) NetConfig() map[string]config.NetworkConfig {
+	return r.netcfg
 }

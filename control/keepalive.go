@@ -83,8 +83,8 @@ func SendKeepalive(conn quic.Connection, logger *log.Logger) {
 			continue
 		}
 
-		logger.Debugf("[debug/sendkeepalive] Header JSON: %s", toJson(header))
-		logger.Debugf("[debug/sendkeepalive] Body JSON:   %s", toJson(body))
+		logger.Debugf("[debug/sendkeepalive] Header JSON: %s", ToJson(header))
+		logger.Debugf("[debug/sendkeepalive] Body JSON:   %s", ToJson(body))
 
 		_ = stream.Close()
 		logger.Debugf("Sent keepalive to %s", conn.RemoteAddr())
@@ -122,9 +122,4 @@ func backoffDuration(failures int) time.Duration {
 		return maxBackoff
 	}
 	return backoff
-}
-
-func toJson(v interface{}) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }

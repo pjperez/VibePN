@@ -44,8 +44,8 @@ func SendRouteAnnounce(conn quic.Connection, network string, routes []Route, log
 		return
 	}
 
-	logger.Infof("[debug/sendroute] Header JSON: %s", toJson(header))
-	logger.Infof("[debug/sendroute] Body JSON:   %s", toJson(payload))
+	logger.Infof("[debug/sendroute] Header JSON: %s", ToJson(header))
+	logger.Infof("[debug/sendroute] Body JSON:   %s", ToJson(payload))
 
 	logger.Infof("<<< Sent route-announce for %s (%d entries)", network, len(routes))
 }
@@ -79,9 +79,4 @@ func HandleRouteAnnounce(network string, routes []Route, rt *netgraph.RouteTable
 		})
 	}
 	logger.Infof("Handled route-announce for %s (%d routes)", network, len(routes))
-}
-
-func toJson(v interface{}) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }

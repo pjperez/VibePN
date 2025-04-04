@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 
 	"vibepn/control"
 	"vibepn/forward"
@@ -58,7 +57,6 @@ func AcceptLoop(
 			registry.Add(peerID, conn)
 			tracker.MarkAlive(peerID)
 
-			// 🔥 After handshake, always enter session loop
 			handleSession(conn, inbound)
 		}(sess)
 	}
@@ -95,15 +93,21 @@ func expectHello(conn quic.Connection) (string, error) {
 		return "", fmt.Errorf("failed to decode hello message: %w", err)
 	}
 
-	// 🔥 After receiving hello, reply with our own hello
-	replyHello(conn, msg.NodeID)
+	replyHello(conn)
 
 	return msg.NodeID, nil
 }
 
-func replyHello(conn quic.Connection, peerID string) {
+func replyHello(conn quic.Connection) {
 	logger := log.New("quic/accept")
-	logger.Infof("Replying to peer %s with Hello", peerID)
+
+	myID := GetOwnFingerprint()
+	if myID == "" {
+		logger.Warnf("Cannot send hello reply: own fingerprint is not set")
+		return
+	}
+
+	logger.Infof("Replying to peer with Hello (our ID = %s)", myID)
 
 	stream, err := conn.OpenStream()
 	if err != nil {
@@ -114,7 +118,7 @@ func replyHello(conn quic.Connection, peerID string) {
 
 	header := control.Header{Type: "hello"}
 	body := control.HelloMessage{
-		NodeID: peerID, // <-- we could send our fingerprint, depending on design
+		NodeID: myID,
 		Networks: []struct {
 			Name    string `json:"name"`
 			Address string `json:"address"`
@@ -136,7 +140,7 @@ func replyHello(conn quic.Connection, peerID string) {
 		return
 	}
 
-	logger.Infof("Sent hello to peer: %s", peerID)
+	logger.Infof("Sent hello reply")
 }
 
 func NewReplayableStream(data []byte) *bytes.Reader {
@@ -160,16 +164,7 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 }
 
 func debugStream(stream quic.Stream, label string) {
-	go func() {
-		buf := make([]byte, 1024)
-		n, err := stream.Read(buf)
-		if err != nil && err != io.EOF {
-			log.New("quic/debug").Warnf("[%s] Failed to read debug stream: %v", label, err)
-			return
-		}
-		peek := buf[:n]
-		log.New("quic/debug").Debugf("[%s] First %d bytes: %x", label, n, peek)
-	}()
+	log.New("quic/debug").Debugf("[%s] Stream accepted (id=%d)", label, stream.StreamID())
 }
 
 func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {
@@ -231,8 +226,8 @@ func handleDecodedStream(stream quic.Stream, h control.Header, logger *log.Logge
 			_ = stream.Close()
 			return
 		}
-
 		logger.Infof("Raw stream for network %s", rawHeader.Network)
+
 		if inbound != nil {
 			go inbound.HandleRawStream(stream, rawHeader.Network)
 		} else {

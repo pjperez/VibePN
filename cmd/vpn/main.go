@@ -31,6 +31,8 @@ func main() {
 		logger.Fatalf("Failed to load config: %v", err)
 	}
 
+	quic.SetOwnFingerprint(cfg.Identity.Fingerprint)
+
 	tlsConf, err := crypto.LoadTLS(
 		cfg.Identity.Cert,
 		cfg.Identity.Key,

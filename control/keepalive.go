@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -66,17 +67,15 @@ func SendKeepalive(conn quic.Connection, logger *log.Logger) {
 			Timestamp: time.Now().Unix(),
 		}
 
-		enc := json.NewEncoder(stream)
-		if err := enc.Encode(header); err != nil {
-			logger.Warnf("Keepalive encode header failed: %v", err)
-			_ = stream.Close()
-			failureCount++
-			time.Sleep(backoffDuration(failureCount))
-			continue
-		}
+		headerBytes, _ := json.Marshal(header)
+		payloadBytes, _ := json.Marshal(msg)
 
-		if err := enc.Encode(msg); err != nil {
-			logger.Warnf("Keepalive encode payload failed: %v", err)
+		logger.Debugf("[debug/sendkeepalive] Header JSON: %s", string(headerBytes))
+		logger.Debugf("[debug/sendkeepalive] Body JSON:   %s", string(payloadBytes))
+
+		_, err = fmt.Fprintf(stream, "%s\n%s\n", string(headerBytes), string(payloadBytes))
+		if err != nil {
+			logger.Warnf("Failed to send keepalive: %v", err)
 			_ = stream.Close()
 			failureCount++
 			time.Sleep(backoffDuration(failureCount))
@@ -110,13 +109,4 @@ func backoffDuration(failures int) time.Duration {
 		return maxBackoff
 	}
 	return backoff
-}
-
-func ParseKeepalive(dec *json.Decoder, logger *log.Logger) {
-	var msg KeepaliveMessage
-	if err := dec.Decode(&msg); err != nil {
-		logger.Warnf("Failed to decode keepalive payload: %v", err)
-		return
-	}
-	logger.Debugf("Received keepalive: timestamp=%d", msg.Timestamp)
 }

@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"vibepn/log"
@@ -12,7 +13,7 @@ import (
 
 type Route struct {
 	Prefix    string `json:"prefix"`
-	PeerID    string `json:"via"` // "via" in JSON
+	PeerID    string `json:"via"` // remains "via" in JSON for compatibility
 	Metric    int    `json:"metric"`
 	ExpiresIn int    `json:"expires_in"`
 }
@@ -27,20 +28,21 @@ func SendRouteAnnounce(conn quic.Connection, network string, routes []Route, log
 	}
 	defer stream.Close()
 
-	enc := json.NewEncoder(stream)
-
 	header := Header{Type: "route-announce"}
-	if err := enc.Encode(header); err != nil {
-		logger.Errorf("Failed to encode route-announce header: %v", err)
-		return
-	}
-
 	payload := map[string]interface{}{
 		"network": network,
 		"routes":  routes,
 	}
-	if err := enc.Encode(payload); err != nil {
-		logger.Errorf("Failed to encode route-announce payload: %v", err)
+
+	headerBytes, _ := json.Marshal(header)
+	payloadBytes, _ := json.Marshal(payload)
+
+	logger.Infof("[debug/sendroute] Header JSON: %s", string(headerBytes))
+	logger.Infof("[debug/sendroute] Body JSON:   %s", string(payloadBytes))
+
+	_, err = fmt.Fprintf(stream, "%s\n%s\n", string(headerBytes), string(payloadBytes))
+	if err != nil {
+		logger.Warnf("Failed to send route-announce: %v", err)
 		return
 	}
 
@@ -58,17 +60,4 @@ func HandleRouteAnnounce(network string, routes []Route, rt *netgraph.RouteTable
 		})
 	}
 	logger.Infof("Handled route-announce for %s (%d routes)", network, len(routes))
-}
-
-func ParseRouteAnnounce(dec *json.Decoder, logger *log.Logger) {
-	var payload struct {
-		Network string  `json:"network"`
-		Routes  []Route `json:"routes"`
-	}
-	if err := dec.Decode(&payload); err != nil {
-		logger.Warnf("Failed to decode route-announce payload: %v", err)
-		return
-	}
-	logger.Infof("Received route announcement for network=%s", payload.Network)
-	HandleRouteAnnounce(payload.Network, payload.Routes, GetRouteTable(), logger)
 }

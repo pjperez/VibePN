@@ -185,13 +185,10 @@ func handleDecodedStream(stream quic.Stream, h control.Header, logger *log.Logge
 		logger.Infof("Unexpected duplicate hello")
 
 	case "route-announce":
-		var msg map[string]interface{}
-		if err := json.NewDecoder(stream).Decode(&msg); err != nil {
-			logger.Warnf("Failed to decode route-announce: %v", err)
-			_ = stream.Close()
-			return
-		}
-		logger.Infof("Received route announcement for network %v", msg["network"])
+		control.ParseRouteAnnounce(json.NewDecoder(stream), logger)
+
+	case "keepalive":
+		control.ParseKeepalive(json.NewDecoder(stream), logger)
 
 	case "route-withdraw":
 		var msg map[string]interface{}
@@ -201,15 +198,6 @@ func handleDecodedStream(stream quic.Stream, h control.Header, logger *log.Logge
 			return
 		}
 		logger.Infof("Received route withdrawal for network %v", msg["network"])
-
-	case "keepalive":
-		var msg control.KeepaliveMessage
-		if err := json.NewDecoder(stream).Decode(&msg); err != nil {
-			logger.Warnf("Failed to decode keepalive: %v", err)
-			_ = stream.Close()
-			return
-		}
-		logger.Debugf("Received keepalive: %d", msg.Timestamp)
 
 	case "goodbye":
 		logger.Infof("Received goodbye")

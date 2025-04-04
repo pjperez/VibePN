@@ -12,7 +12,7 @@ import (
 
 type Route struct {
 	Prefix    string `json:"prefix"`
-	PeerID    string `json:"via"` // remains "via" in JSON for compatibility
+	PeerID    string `json:"via"` // "via" in JSON
 	Metric    int    `json:"metric"`
 	ExpiresIn int    `json:"expires_in"`
 }
@@ -58,4 +58,17 @@ func HandleRouteAnnounce(network string, routes []Route, rt *netgraph.RouteTable
 		})
 	}
 	logger.Infof("Handled route-announce for %s (%d routes)", network, len(routes))
+}
+
+func ParseRouteAnnounce(dec *json.Decoder, logger *log.Logger) {
+	var payload struct {
+		Network string  `json:"network"`
+		Routes  []Route `json:"routes"`
+	}
+	if err := dec.Decode(&payload); err != nil {
+		logger.Warnf("Failed to decode route-announce payload: %v", err)
+		return
+	}
+	logger.Infof("Received route announcement for network=%s", payload.Network)
+	HandleRouteAnnounce(payload.Network, payload.Routes, GetRouteTable(), logger)
 }

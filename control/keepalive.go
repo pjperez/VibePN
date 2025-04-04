@@ -111,3 +111,12 @@ func backoffDuration(failures int) time.Duration {
 	}
 	return backoff
 }
+
+func ParseKeepalive(dec *json.Decoder, logger *log.Logger) {
+	var msg KeepaliveMessage
+	if err := dec.Decode(&msg); err != nil {
+		logger.Warnf("Failed to decode keepalive payload: %v", err)
+		return
+	}
+	logger.Debugf("Received keepalive: timestamp=%d", msg.Timestamp)
+}

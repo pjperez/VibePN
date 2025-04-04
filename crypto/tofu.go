@@ -43,9 +43,6 @@ func loadTOFU() {
 }
 
 func saveTOFU() {
-	tofuMu.Lock()
-	defer tofuMu.Unlock()
-
 	dir := filepath.Dir(tofuPath)
 	_ = os.MkdirAll(dir, 0700)
 

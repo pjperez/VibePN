@@ -2,7 +2,6 @@ package control
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"vibepn/log"
@@ -28,25 +27,45 @@ func SendRouteAnnounce(conn quic.Connection, network string, routes []Route, log
 	}
 	defer stream.Close()
 
+	enc := json.NewEncoder(stream)
+
 	header := Header{Type: "route-announce"}
+	if err := enc.Encode(header); err != nil {
+		logger.Errorf("Failed to encode route-announce header: %v", err)
+		return
+	}
+
 	payload := map[string]interface{}{
 		"network": network,
 		"routes":  routes,
 	}
-
-	headerBytes, _ := json.Marshal(header)
-	payloadBytes, _ := json.Marshal(payload)
-
-	logger.Infof("[debug/sendroute] Header JSON: %s", string(headerBytes))
-	logger.Infof("[debug/sendroute] Body JSON:   %s", string(payloadBytes))
-
-	_, err = fmt.Fprintf(stream, "%s\n%s\n", string(headerBytes), string(payloadBytes))
-	if err != nil {
-		logger.Warnf("Failed to send route-announce: %v", err)
+	if err := enc.Encode(payload); err != nil {
+		logger.Errorf("Failed to encode route-announce payload: %v", err)
 		return
 	}
 
+	logger.Infof("[debug/sendroute] Header JSON: %s", toJson(header))
+	logger.Infof("[debug/sendroute] Body JSON:   %s", toJson(payload))
+
 	logger.Infof("<<< Sent route-announce for %s (%d entries)", network, len(routes))
+}
+
+func ParseRouteAnnounce(dec *json.Decoder, logger *log.Logger) {
+	var payload map[string]interface{}
+	if err := dec.Decode(&payload); err != nil {
+		logger.Warnf("Failed to decode route-announce payload: %v", err)
+		return
+	}
+	logger.Infof("Received route announcement for network %v", payload["network"])
+}
+
+func ParseRouteWithdraw(dec *json.Decoder, logger *log.Logger) {
+	var payload map[string]interface{}
+	if err := dec.Decode(&payload); err != nil {
+		logger.Warnf("Failed to decode route-withdraw payload: %v", err)
+		return
+	}
+	logger.Infof("Received route withdrawal for network %v", payload["network"])
 }
 
 func HandleRouteAnnounce(network string, routes []Route, rt *netgraph.RouteTable, logger *log.Logger) {
@@ -62,26 +81,7 @@ func HandleRouteAnnounce(network string, routes []Route, rt *netgraph.RouteTable
 	logger.Infof("Handled route-announce for %s (%d routes)", network, len(routes))
 }
 
-func ParseRouteAnnounce(stream quic.Stream, logger *log.Logger) {
-	defer stream.Close()
-
-	var payload struct {
-		Network string  `json:"network"`
-		Routes  []Route `json:"routes"`
-	}
-
-	dec := json.NewDecoder(stream)
-	if err := dec.Decode(&payload); err != nil {
-		logger.Warnf("Failed to decode route-announce payload: %v", err)
-		return
-	}
-
-	logger.Infof("✅ Parsed route-announce for network %s (%d routes)", payload.Network, len(payload.Routes))
-
-	rt := GetRouteTable()
-	if rt != nil {
-		HandleRouteAnnounce(payload.Network, payload.Routes, rt, logger)
-	} else {
-		logger.Warnf("No route table available, ignoring route-announce")
-	}
+func toJson(v interface{}) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }

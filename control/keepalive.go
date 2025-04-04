@@ -2,7 +2,6 @@ package control
 
 import (
 	"encoding/json"
-	"fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -22,11 +21,10 @@ type keepaliveState struct {
 	mu       sync.Mutex
 }
 
-// Constants
 const (
 	baseInterval      = 10 * time.Second
 	maxBackoff        = 2 * time.Minute
-	jitterWindowMs    = 1000 // ±1s
+	jitterWindowMs    = 1000
 	enableDebugTimers = false
 )
 
@@ -62,25 +60,31 @@ func SendKeepalive(conn quic.Connection, logger *log.Logger) {
 			continue
 		}
 
+		enc := json.NewEncoder(stream)
+
 		header := Header{Type: "keepalive"}
-		msg := KeepaliveMessage{
+		body := KeepaliveMessage{
 			Timestamp: time.Now().Unix(),
 		}
 
-		headerBytes, _ := json.Marshal(header)
-		payloadBytes, _ := json.Marshal(msg)
-
-		logger.Debugf("[debug/sendkeepalive] Header JSON: %s", string(headerBytes))
-		logger.Debugf("[debug/sendkeepalive] Body JSON:   %s", string(payloadBytes))
-
-		_, err = fmt.Fprintf(stream, "%s\n%s\n", string(headerBytes), string(payloadBytes))
-		if err != nil {
-			logger.Warnf("Failed to send keepalive: %v", err)
+		if err := enc.Encode(header); err != nil {
+			logger.Warnf("Keepalive encode header failed: %v", err)
 			_ = stream.Close()
 			failureCount++
 			time.Sleep(backoffDuration(failureCount))
 			continue
 		}
+
+		if err := enc.Encode(body); err != nil {
+			logger.Warnf("Keepalive encode payload failed: %v", err)
+			_ = stream.Close()
+			failureCount++
+			time.Sleep(backoffDuration(failureCount))
+			continue
+		}
+
+		logger.Debugf("[debug/sendkeepalive] Header JSON: %s", toJson(header))
+		logger.Debugf("[debug/sendkeepalive] Body JSON:   %s", toJson(body))
 
 		_ = stream.Close()
 		logger.Debugf("Sent keepalive to %s", conn.RemoteAddr())
@@ -90,6 +94,15 @@ func SendKeepalive(conn quic.Connection, logger *log.Logger) {
 		state.lastSent = time.Now()
 		state.mu.Unlock()
 	}
+}
+
+func ParseKeepalive(dec *json.Decoder, logger *log.Logger) {
+	var msg KeepaliveMessage
+	if err := dec.Decode(&msg); err != nil {
+		logger.Warnf("Failed to decode keepalive payload: %v", err)
+		return
+	}
+	logger.Debugf("Received keepalive: %d", msg.Timestamp)
 }
 
 func shouldSend(state *keepaliveState, minInterval time.Duration) bool {
@@ -111,16 +124,7 @@ func backoffDuration(failures int) time.Duration {
 	return backoff
 }
 
-func ParseKeepalive(stream quic.Stream, logger *log.Logger) {
-	defer stream.Close()
-
-	var msg KeepaliveMessage
-	dec := json.NewDecoder(stream)
-
-	if err := dec.Decode(&msg); err != nil {
-		logger.Warnf("Failed to decode keepalive payload: %v", err)
-		return
-	}
-
-	logger.Debugf("✅ Parsed keepalive: timestamp=%d", msg.Timestamp)
+func toJson(v interface{}) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }

@@ -1,6 +1,7 @@
 package forward
 
 import (
+	"encoding/binary"
 	"io"
 	"vibepn/log"
 	"vibepn/tun"
@@ -13,7 +14,6 @@ type Inbound struct {
 	logger *log.Logger
 }
 
-// NewInbound creates a new Inbound handler.
 func NewInbound(dev tun.Device) *Inbound {
 	return &Inbound{
 		dev:    dev,
@@ -21,25 +21,36 @@ func NewInbound(dev tun.Device) *Inbound {
 	}
 }
 
-// HandleRawStream pumps raw packets from the QUIC stream into the TUN device.
 func (i *Inbound) HandleRawStream(stream quic.Stream, _ string) {
 	i.logger.Infof("Handling raw stream %d", stream.StreamID())
 
-	buf := make([]byte, 65535) // IP MTU max size
-
 	for {
-		n, err := stream.Read(buf)
+		// ✍️ Read 2 bytes for packet length
+		lenBuf := make([]byte, 2)
+		_, err := io.ReadFull(stream, lenBuf)
 		if err != nil {
 			if err == io.EOF {
 				i.logger.Infof("Raw stream closed (id=%d)", stream.StreamID())
 			} else {
-				i.logger.Warnf("Raw stream read error: %v", err)
+				i.logger.Warnf("Failed to read packet length: %v", err)
 			}
 			return
 		}
 
-		packet := make([]byte, n)
-		copy(packet, buf[:n])
+		packetLen := binary.BigEndian.Uint16(lenBuf)
+
+		if packetLen == 0 || packetLen > 65535 {
+			i.logger.Warnf("Invalid packet length: %d", packetLen)
+			return
+		}
+
+		// ✍️ Read the actual packet
+		packet := make([]byte, packetLen)
+		_, err = io.ReadFull(stream, packet)
+		if err != nil {
+			i.logger.Warnf("Failed to read full packet: %v", err)
+			return
+		}
 
 		_, err = i.dev.Write(packet)
 		if err != nil {

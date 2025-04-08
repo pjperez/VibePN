@@ -55,6 +55,25 @@ func (rt *RouteTable) RemoveRoutesForPeer(peerID string) {
 	}
 }
 
+func (rt *RouteTable) RemoveRoute(network, prefix string) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	list, ok := rt.routes[network]
+	if !ok {
+		return
+	}
+
+	var updated []Route
+	for _, r := range list {
+		if r.Prefix != prefix {
+			updated = append(updated, r)
+		}
+	}
+
+	rt.routes[network] = updated
+}
+
 func (rt *RouteTable) RoutesForNetwork(network, excludePeer string) []Route {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()

@@ -155,21 +155,38 @@ func ConnectToPeers(
 						case "hello":
 							logger.Infof("Unexpected duplicate hello")
 						case "route-announce":
-							var msg map[string]interface{}
+							var msg struct {
+								Network string          `json:"network"`
+								Routes  []control.Route `json:"routes"`
+							}
 							if err := dec.Decode(&msg); err != nil {
 								logger.Warnf("Failed to decode route-announce: %v", err)
 								_ = stream.Close()
 								return
 							}
-							logger.Infof("Received route announcement for network %v", msg["network"])
+							logger.Infof("Received route announcement for network %v (%d routes)", msg.Network, len(msg.Routes))
+
+							for _, r := range msg.Routes {
+								control.GetRouteTable().AddRoute(netgraph.Route{ // <-- 🛠️ Use netgraph.Route
+									Prefix: r.Prefix,
+									PeerID: r.PeerID,
+									Metric: r.Metric,
+								})
+							}
 						case "route-withdraw":
-							var msg map[string]interface{}
+							var msg struct {
+								Network string `json:"network"`
+								Prefix  string `json:"prefix"`
+							}
 							if err := dec.Decode(&msg); err != nil {
 								logger.Warnf("Failed to decode route-withdraw: %v", err)
 								_ = stream.Close()
 								return
 							}
-							logger.Infof("Received route withdrawal for network %v", msg["network"])
+							logger.Infof("Received route withdrawal for network=%s, prefix=%s", msg.Network, msg.Prefix)
+
+							control.GetRouteTable().RemoveRoute(msg.Network, msg.Prefix)
+
 						case "keepalive":
 							var msg control.KeepaliveMessage
 							if err := dec.Decode(&msg); err != nil {

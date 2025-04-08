@@ -39,7 +39,7 @@ func (i *Inbound) HandleRawStream(stream quic.Stream, _ string) {
 
 		packetLen := binary.BigEndian.Uint16(lenBuf)
 
-		if packetLen == 0 || packetLen > 65535 {
+		if packetLen == 0 {
 			i.logger.Warnf("Invalid packet length: %d", packetLen)
 			return
 		}

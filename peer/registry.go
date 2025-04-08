@@ -7,15 +7,16 @@ import (
 	"vibepn/control"
 	"vibepn/log"
 
-	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go"
 )
 
 type Registry struct {
-	mu       sync.RWMutex
-	conns    map[string]quic.Connection // peerID → connection
-	logger   *log.Logger
-	identity config.Identity
-	netcfg   map[string]config.NetworkConfig
+	mu        sync.RWMutex
+	conns     map[string]quic.Connection // peerID → connection
+	logger    *log.Logger
+	identity  config.Identity
+	netcfg    map[string]config.NetworkConfig
+	onConnect func(peerID string, conn quic.Connection) // 🧠 NEW: callback
 }
 
 func NewRegistry(identity config.Identity, netcfg map[string]config.NetworkConfig) *Registry {
@@ -32,6 +33,10 @@ func (r *Registry) Add(peerID string, conn quic.Connection) {
 	defer r.mu.Unlock()
 	r.conns[peerID] = conn
 	r.logger.Infof("Registered connection for peer %s", peerID)
+
+	if r.onConnect != nil {
+		r.onConnect(peerID, conn) // 🧠 Trigger outbound sender
+	}
 }
 
 func (r *Registry) Remove(peerID string) {
@@ -75,4 +80,11 @@ func (r *Registry) Identity() config.Identity {
 
 func (r *Registry) NetConfig() map[string]config.NetworkConfig {
 	return r.netcfg
+}
+
+// 🧠 NEW: set callback to trigger when a peer connects
+func (r *Registry) SetOnConnect(cb func(peerID string, conn quic.Connection)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onConnect = cb
 }

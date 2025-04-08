@@ -14,6 +14,31 @@ import (
 	quic "github.com/quic-go/quic-go"
 )
 
+// StartRawStream sends raw IP packets over a QUIC stream.
+func StartRawStream(conn quic.Connection, outbound <-chan []byte) {
+	logger := log.New("peer/raw")
+
+	stream, err := conn.OpenStreamSync(context.Background())
+	if err != nil {
+		logger.Errorf("Failed to open raw stream: %v", err)
+		return
+	}
+
+	logger.Infof("Opened raw stream to peer (id=%d)", stream.StreamID())
+
+	go func() {
+		defer stream.Close()
+
+		for packet := range outbound {
+			_, err := stream.Write(packet)
+			if err != nil {
+				logger.Warnf("Error writing packet to peer: %v", err)
+				return
+			}
+		}
+	}()
+}
+
 func ConnectToPeers(
 	peers []config.Peer,
 	identity config.Identity,

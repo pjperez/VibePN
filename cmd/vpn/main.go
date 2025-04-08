@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"os/signal"
@@ -16,7 +17,10 @@ import (
 	"vibepn/metrics"
 	"vibepn/netgraph"
 	"vibepn/peer"
-	"vibepn/quic"
+	vquic "vibepn/quic" // ✅ alias YOUR OWN quic package
+	"vibepn/tun"
+
+	quic "github.com/quic-go/quic-go" // ✅ import real quic-go too
 )
 
 func main() {
@@ -31,7 +35,7 @@ func main() {
 		logger.Fatalf("Failed to load config: %v", err)
 	}
 
-	quic.SetOwnFingerprint(cfg.Identity.Fingerprint)
+	vquic.SetOwnFingerprint(cfg.Identity.Fingerprint)
 
 	tlsConf, err := crypto.LoadTLS(
 		cfg.Identity.Cert,
@@ -65,21 +69,34 @@ func main() {
 	}
 
 	dispatcher := forward.NewDispatcher(routeTable, ifaceMgr.Devices, registry)
-	for netName, dev := range ifaceMgr.Devices {
-		dispatcher.Start(netName, dev)
+	for netName, d := range ifaceMgr.Devices {
+		dispatcher.Start(netName, d)
 	}
 
-	inbound := forward.NewInbound(ifaceMgr.Devices)
+	// Grab any device (we only support 1 for now)
+	var dev *tun.Device
+	for _, d := range ifaceMgr.Devices {
+		dev = d
+		break
+	}
+
+	inbound := forward.NewInbound(*dev)
+	outbound := forward.NewOutbound(*dev)
 
 	go metrics.Serve(":9000")
 	go control.StartUDS("/var/run/vibepn.sock")
 
-	ln, err := quic.Listen(":51820", tlsConf)
+	ln, err := vquic.Listen(":51820", tlsConf)
 	if err != nil {
 		logger.Fatalf("Failed to start QUIC listener: %v", err)
 	}
 
-	go quic.AcceptLoop(*ln, tracker, routeTable, registry, inbound)
+	go vquic.AcceptLoop(*ln, tracker, routeTable, registry, inbound)
+
+	// 🧠 VERY IMPORTANT: send outbound packets when a peer connects
+	registry.SetOnConnect(func(peerID string, conn quic.Connection) {
+		go outbound.SendPackets(context.Background(), conn)
+	})
 
 	peer.ConnectToPeers(cfg.Peers, cfg.Identity, routeTable, cfg.Networks, registry)
 

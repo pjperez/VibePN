@@ -1,20 +1,15 @@
 package quic
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
-	"fmt"
-	"io"
 
-	"vibepn/control"
 	"vibepn/forward"
 	"vibepn/log"
 	"vibepn/netgraph"
 	"vibepn/peer"
 
-	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go"
 )
 
 func Listen(addr string, tlsConf *tls.Config) (*quic.Listener, error) {
@@ -47,101 +42,8 @@ func AcceptLoop(
 
 		logger.Infof("Accepted connection from %s", sess.RemoteAddr())
 
-		go func(conn quic.Connection) {
-			peerID, err := expectHello(conn)
-			if err != nil {
-				logger.Warnf("Invalid hello from %s: %v", conn.RemoteAddr(), err)
-				_ = conn.CloseWithError(0, "invalid hello")
-				return
-			}
-
-			registry.Add(peerID, conn)
-			tracker.MarkAlive(peerID)
-
-			handleSession(conn, inbound)
-		}(sess)
+		go handleSession(sess, inbound)
 	}
-}
-
-func expectHello(conn quic.Connection) (string, error) {
-	stream, err := conn.AcceptStream(context.Background())
-	if err != nil {
-		return "", err
-	}
-
-	buf := make([]byte, 4096)
-	n, err := stream.Read(buf)
-	if err != nil {
-		return "", fmt.Errorf("failed to read stream: %w", err)
-	}
-	rawData := buf[:n]
-
-	logger := log.New("quic/expecthello")
-	logger.Infof("[debug/expecthello] Raw data received (%d bytes): %s", len(rawData), string(rawData))
-
-	dec := json.NewDecoder(bytes.NewReader(rawData))
-
-	var header control.Header
-	if err := dec.Decode(&header); err != nil {
-		return "", fmt.Errorf("failed to decode header: %w", err)
-	}
-	if header.Type != "hello" {
-		return "", fmt.Errorf("expected hello message, got %s", header.Type)
-	}
-
-	var msg control.HelloMessage
-	if err := dec.Decode(&msg); err != nil {
-		return "", fmt.Errorf("failed to decode hello message: %w", err)
-	}
-
-	replyHello(conn)
-
-	return msg.NodeID, nil
-}
-
-func replyHello(conn quic.Connection) {
-	logger := log.New("quic/accept")
-
-	myID := GetOwnFingerprint()
-	if myID == "" {
-		logger.Warnf("Cannot send hello reply: own fingerprint is not set")
-		return
-	}
-
-	logger.Infof("Replying to peer with Hello (our ID = %s)", myID)
-
-	stream, err := conn.OpenStream()
-	if err != nil {
-		logger.Warnf("Failed to open stream for Hello reply: %v", err)
-		return
-	}
-	defer stream.Close()
-
-	header := control.Header{Type: "hello"}
-	body := control.HelloMessage{
-		NodeID: myID,
-		Networks: []struct {
-			Name    string `json:"name"`
-			Address string `json:"address"`
-		}{},
-		Features: map[string]bool{
-			"metrics": true,
-		},
-	}
-
-	headerBytes, _ := json.Marshal(header)
-	bodyBytes, _ := json.Marshal(body)
-
-	logger.Infof("[debug/sendhello] Header JSON: %s", string(headerBytes))
-	logger.Infof("[debug/sendhello] Body JSON:   %s", string(bodyBytes))
-
-	_, err = fmt.Fprintf(stream, "%s\n%s\n", string(headerBytes), string(bodyBytes))
-	if err != nil {
-		logger.Warnf("Failed to send Hello reply: %v", err)
-		return
-	}
-
-	logger.Infof("Sent hello reply")
 }
 
 func handleSession(sess quic.Connection, inbound *forward.Inbound) {
@@ -154,83 +56,19 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 			return
 		}
 
-		debugStream(stream, "incoming")
-
-		go debugAndHandleStream(stream, logger, inbound)
+		go handleRawStream(stream, inbound)
 	}
 }
 
-func debugStream(stream quic.Stream, label string) {
-	log.New("quic/debug").Debugf("[%s] Stream accepted (id=%d)", label, stream.StreamID())
-}
+func handleRawStream(stream quic.Stream, inbound *forward.Inbound) {
+	logger := log.New("quic/raw")
 
-func debugAndHandleStream(stream quic.Stream, logger *log.Logger, inbound *forward.Inbound) {
-	dec := json.NewDecoder(stream)
+	logger.Debugf("Raw stream accepted (id=%d)", stream.StreamID())
 
-	var header control.Header
-	if err := dec.Decode(&header); err != nil {
-		logger.Warnf("Failed to decode stream header: %v", err)
-		_ = stream.Close()
-		return
-	}
-
-	logger.Infof("Decoded stream header type: %s", header.Type)
-
-	if header.Type == "raw" {
-		var rawHeader struct {
-			Network string `json:"network"`
-		}
-		if err := dec.Decode(&rawHeader); err != nil {
-			logger.Warnf("Failed to decode raw stream metadata: %v", err)
-			_ = stream.Close()
-			return
-		}
-		logger.Infof("Raw stream for network %s", rawHeader.Network)
-
-		if inbound != nil {
-			go inbound.HandleRawStream(stream, rawHeader.Network) // Pass live stream
-		} else {
-			logger.Warnf("Inbound handler not configured, discarding raw stream")
-			stream.CancelRead(0)
-		}
-		return
-	}
-
-	// 🚀 Non-raw: fully buffer
-	buf, err := io.ReadAll(stream)
-	if err != nil {
-		logger.Warnf("Failed to read stream body: %v", err)
-		_ = stream.Close()
-		return
-	}
-	_ = stream.Close()
-
-	handleDecodedStream(buf, header, logger)
-}
-
-func handleDecodedStream(data []byte, header control.Header, logger *log.Logger) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-
-	switch header.Type {
-	case "hello":
-		logger.Infof("Unexpected duplicate hello")
-
-	case "route-announce":
-		control.ParseRouteAnnounce(dec, logger)
-
-	case "route-withdraw":
-		control.ParseRouteWithdraw(dec, logger)
-
-	case "keepalive":
-		control.ParseKeepalive(dec, logger)
-
-	case "goodbye":
-		logger.Infof("Received goodbye")
-
-	case "metrics":
-		logger.Infof("Received metrics stream (not yet handled)")
-
-	default:
-		logger.Warnf("Unknown stream type: %s", header.Type)
+	if inbound != nil {
+		inbound.HandleRawStream(stream, "") // no network name needed anymore
+	} else {
+		logger.Warnf("Inbound handler not configured, dropping stream")
+		stream.CancelRead(0)
 	}
 }

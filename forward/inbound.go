@@ -2,8 +2,6 @@ package forward
 
 import (
 	"io"
-	"net"
-
 	"vibepn/log"
 	"vibepn/tun"
 
@@ -11,51 +9,42 @@ import (
 )
 
 type Inbound struct {
-	Ifaces map[string]*tun.Device // network → device
-	Logger *log.Logger
+	dev    tun.Device
+	logger *log.Logger
 }
 
-func NewInbound(ifaces map[string]*tun.Device) *Inbound {
+// NewInbound creates a new Inbound handler.
+func NewInbound(dev tun.Device) *Inbound {
 	return &Inbound{
-		Ifaces: ifaces,
-		Logger: log.New("forward/inbound"),
+		dev:    dev,
+		logger: log.New("forward/inbound"),
 	}
 }
 
-func (i *Inbound) HandleRawStream(stream quic.Stream, network string) {
-	dev, ok := i.Ifaces[network]
-	if !ok {
-		i.Logger.Warnf("No interface for network %s", network)
-		stream.CancelRead(0)
-		return
-	}
+// HandleRawStream pumps raw packets from the QUIC stream into the TUN device.
+func (i *Inbound) HandleRawStream(stream quic.Stream, _ string) {
+	i.logger.Infof("Handling raw stream %d", stream.StreamID())
 
-	defer stream.Close()
+	buf := make([]byte, 65535) // IP MTU max size
 
-	buf := make([]byte, 1500)
 	for {
 		n, err := stream.Read(buf)
-		if err == io.EOF {
-			return
-		}
 		if err != nil {
-			i.Logger.Warnf("[%s] Stream read error: %v", network, err)
+			if err == io.EOF {
+				i.logger.Infof("Raw stream closed (id=%d)", stream.StreamID())
+			} else {
+				i.logger.Warnf("Raw stream read error: %v", err)
+			}
 			return
 		}
 
-		pkt := buf[:n]
-		if len(pkt) < 20 || pkt[0]>>4 != 4 {
-			i.Logger.Warnf("[%s] Invalid IPv4 packet", network)
-			continue
-		}
+		packet := make([]byte, n)
+		copy(packet, buf[:n])
 
-		_, err = dev.Write(pkt)
+		_, err = i.dev.Write(packet)
 		if err != nil {
-			i.Logger.Errorf("[%s] Failed to write to TUN: %v", network, err)
+			i.logger.Warnf("Failed to write packet to TUN: %v", err)
 			return
 		}
-
-		dst := net.IPv4(pkt[16], pkt[17], pkt[18], pkt[19])
-		i.Logger.Debugf("[%s] Injected packet to %s (%d bytes)", network, dst, n)
 	}
 }

@@ -68,7 +68,21 @@ func ConnectToPeers(
 				return
 			}
 
-			// 🚀 Control Loop
+			// 📢 Announce all exported routes
+			for netName, netCfg := range netcfg {
+				if !netCfg.Export {
+					continue
+				}
+				err = control.SendRouteAnnounce(stream, netName, []string{netCfg.Prefix})
+				if err != nil {
+					logger.Warnf("Failed to announce route for network %s: %v", netName, err)
+				}
+			}
+
+			// 🫡 Start Keepalive loop
+			control.StartKeepaliveLoop(conn)
+
+			// 🚀 Start Control Loop
 			go HandleControlStream(conn, stream)
 		}()
 	}
@@ -141,7 +155,6 @@ func handleRouteAnnounce(body []byte) {
 		return
 	}
 
-	// First byte = network name length
 	networkLen := int(body[0])
 	if len(body) < 1+networkLen {
 		logger.Warnf("Invalid route-announce network name length")
@@ -159,7 +172,6 @@ func handleRouteAnnounce(body []byte) {
 			return
 		}
 
-		// Parse each route
 		prefixLen := int(body[cursor])
 		prefixBytes := body[cursor+1 : cursor+1+prefixLen]
 		metric := binary.BigEndian.Uint16(body[cursor+1+prefixLen : cursor+1+prefixLen+2])
@@ -188,7 +200,6 @@ func handleRouteWithdraw(body []byte) {
 		return
 	}
 
-	// First byte = network name length
 	networkLen := int(body[0])
 	if len(body) < 1+networkLen {
 		logger.Warnf("Invalid route-withdraw network name length")
@@ -204,7 +215,6 @@ func handleRouteWithdraw(body []byte) {
 		return
 	}
 
-	// Next, prefix length and prefix bytes
 	prefixLen := int(body[cursor])
 	if cursor+1+prefixLen > len(body) {
 		logger.Warnf("Invalid prefix in route-withdraw")

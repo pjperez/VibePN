@@ -3,6 +3,8 @@ package quic
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
+	"io"
 
 	"vibepn/forward"
 	"vibepn/log"
@@ -49,21 +51,19 @@ func AcceptLoop(
 func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 	logger := log.New("quic/session")
 
-	// 📢 1. First stream must be CONTROL stream
 	controlStream, err := sess.AcceptStream(context.Background())
 	if err != nil {
-		logger.Warnf("Failed to accept control stream from %s: %v", sess.RemoteAddr(), err)
+		logger.Warnf("Failed to accept control stream: %v", err)
 		return
 	}
 	logger.Infof("Accepted control stream (id=%d)", controlStream.StreamID())
 
 	go handleControlStream(sess, controlStream)
 
-	// 📢 2. Next streams are RAW streams (IP traffic)
 	for {
 		stream, err := sess.AcceptStream(context.Background())
 		if err != nil {
-			logger.Warnf("Stream error from %s: %v", sess.RemoteAddr(), err)
+			logger.Warnf("Stream accept error: %v", err)
 			return
 		}
 
@@ -74,34 +74,40 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 func handleControlStream(sess quic.Connection, stream quic.Stream) {
 	logger := log.New("quic/control")
 
-	buf := make([]byte, 4096) // reasonable control buffer
-
 	for {
-		n, err := stream.Read(buf)
+		lenBuf := make([]byte, 2)
+		_, err := io.ReadFull(stream, lenBuf)
 		if err != nil {
-			if err.Error() == "EOF" {
-				logger.Warnf("Control stream closed by peer %s", sess.RemoteAddr())
-			} else {
-				logger.Warnf("Control stream error from peer %s: %v", sess.RemoteAddr(), err)
-			}
-
-			// 🚨 Control stream died → kill session
+			logger.Warnf("Control stream closed or error: %v", err)
 			sess.CloseWithError(0, "control stream closed")
 			return
 		}
+		length := binary.BigEndian.Uint16(lenBuf)
 
-		// You can optionally parse control messages here later
-		logger.Debugf("Received control data (%d bytes): %s", n, string(buf[:n]))
+		if length == 0 || length > 4096 {
+			logger.Warnf("Invalid control message length: %d", length)
+			sess.CloseWithError(0, "invalid control message length")
+			return
+		}
+
+		msg := make([]byte, length)
+		_, err = io.ReadFull(stream, msg)
+		if err != nil {
+			logger.Warnf("Failed to read control message: %v", err)
+			sess.CloseWithError(0, "control read error")
+			return
+		}
+
+		logger.Infof("Received control message: %x", msg)
 	}
 }
 
 func handleRawStream(stream quic.Stream, inbound *forward.Inbound) {
 	logger := log.New("quic/raw")
-
 	logger.Debugf("Raw stream accepted (id=%d)", stream.StreamID())
 
 	if inbound != nil {
-		go inbound.HandleRawStream(stream, "") // 🚀 ✅ No network name needed
+		go inbound.HandleRawStream(stream, "")
 	} else {
 		logger.Warnf("Inbound handler not configured, dropping stream")
 		stream.CancelRead(0)

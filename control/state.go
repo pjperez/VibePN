@@ -11,7 +11,7 @@ type PeerLister interface {
 	ListPeers() []shared.PeerState
 }
 
-type PeerSendFunc func(peerID, network string, route Route)
+type PeerSendFunc func(peerID, network string, route netgraph.Route)
 type GoodbyeFunc func()
 
 var (
@@ -46,7 +46,7 @@ func GetPeerTracker() PeerLister {
 	return peerTracker
 }
 
-func SendRouteToPeer(peerID, network string, route Route) {
+func SendRouteToPeer(peerID, network string, route netgraph.Route) {
 	if sendRoute != nil {
 		sendRoute(peerID, network, route)
 	}

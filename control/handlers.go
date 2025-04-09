@@ -7,6 +7,7 @@ import (
 
 	"vibepn/config"
 	"vibepn/log"
+	"vibepn/netgraph"
 )
 
 type CommandRequest struct {
@@ -101,11 +102,10 @@ func Handle(cmd string, _ json.RawMessage, logger *log.Logger) CommandResponse {
 		routeTable.RemoveRoutesForPeer(cfg.Identity.Fingerprint)
 
 		for name, net := range cfg.Networks {
-			route := Route{
-				Prefix:    net.Prefix,
-				PeerID:    cfg.Identity.Fingerprint,
-				Metric:    1,
-				ExpiresIn: 30,
+			route := netgraph.Route{
+				Prefix: net.Prefix,
+				PeerID: cfg.Identity.Fingerprint,
+				Metric: 1,
 			}
 
 			for _, p := range peerTracker.ListPeers() {

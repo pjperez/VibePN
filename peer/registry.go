@@ -1,34 +1,35 @@
 package peer
 
 import (
+	"context"
 	"sync"
 
 	"vibepn/config"
 	"vibepn/control"
 	"vibepn/log"
 
-	"github.com/quic-go/quic-go"
+	gquic "github.com/quic-go/quic-go" // alias to avoid conflict
 )
 
 type Registry struct {
 	mu        sync.RWMutex
-	conns     map[string]quic.Connection // peerID → connection
+	conns     map[string]gquic.Connection // peerID → connection
 	logger    *log.Logger
 	identity  config.Identity
 	netcfg    map[string]config.NetworkConfig
-	onConnect func(peerID string, conn quic.Connection) // 🧠 NEW: callback
+	onConnect func(peerID string, conn gquic.Connection) // 🧠 NEW: callback
 }
 
 func NewRegistry(identity config.Identity, netcfg map[string]config.NetworkConfig) *Registry {
 	return &Registry{
-		conns:    make(map[string]quic.Connection),
+		conns:    make(map[string]gquic.Connection),
 		logger:   log.New("peer/registry"),
 		identity: identity,
 		netcfg:   netcfg,
 	}
 }
 
-func (r *Registry) Add(peerID string, conn quic.Connection) {
+func (r *Registry) Add(peerID string, conn gquic.Connection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.conns[peerID] = conn
@@ -46,17 +47,17 @@ func (r *Registry) Remove(peerID string) {
 	r.logger.Infof("Removed connection for peer %s", peerID)
 }
 
-func (r *Registry) Get(peerID string) quic.Connection {
+func (r *Registry) Get(peerID string) gquic.Connection {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.conns[peerID]
 }
 
-func (r *Registry) All() map[string]quic.Connection {
+func (r *Registry) All() map[string]gquic.Connection {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	out := make(map[string]quic.Connection, len(r.conns))
+	out := make(map[string]gquic.Connection, len(r.conns))
 	for k, v := range r.conns {
 		out[k] = v
 	}
@@ -67,11 +68,19 @@ func (r *Registry) DisconnectAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for peerID, conn := range r.conns {
-		control.SendGoodbye(conn, r.logger)
+		// 🔥 FIX: Open a stream for sending Goodbye
+		stream, err := conn.OpenStreamSync(context.Background())
+		if err == nil {
+			_ = control.SendGoodbye(stream)
+			_ = stream.Close()
+		} else {
+			r.logger.Warnf("Failed to open stream to peer %s for goodbye: %v", peerID, err)
+		}
+
 		_ = conn.CloseWithError(0, "shutdown")
 		r.logger.Infof("Disconnected from peer %s", peerID)
 	}
-	r.conns = map[string]quic.Connection{}
+	r.conns = map[string]gquic.Connection{}
 }
 
 func (r *Registry) Identity() config.Identity {
@@ -83,7 +92,7 @@ func (r *Registry) NetConfig() map[string]config.NetworkConfig {
 }
 
 // 🧠 NEW: set callback to trigger when a peer connects
-func (r *Registry) SetOnConnect(cb func(peerID string, conn quic.Connection)) {
+func (r *Registry) SetOnConnect(cb func(peerID string, conn gquic.Connection)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onConnect = cb

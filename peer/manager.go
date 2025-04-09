@@ -2,7 +2,8 @@ package peer
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/binary"
+	"io"
 	"time"
 
 	"vibepn/config"
@@ -11,33 +12,8 @@ import (
 	"vibepn/log"
 	"vibepn/netgraph"
 
-	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go"
 )
-
-// StartRawStream sends raw IP packets over a QUIC stream.
-func StartRawStream(conn quic.Connection, outbound <-chan []byte) {
-	logger := log.New("peer/raw")
-
-	stream, err := conn.OpenStreamSync(context.Background())
-	if err != nil {
-		logger.Errorf("Failed to open raw stream: %v", err)
-		return
-	}
-
-	logger.Infof("Opened raw stream to peer (id=%d)", stream.StreamID())
-
-	go func() {
-		defer stream.Close()
-
-		for packet := range outbound {
-			_, err := stream.Write(packet)
-			if err != nil {
-				logger.Warnf("Error writing packet to peer: %v", err)
-				return
-			}
-		}
-	}()
-}
 
 func ConnectToPeers(
 	peers []config.Peer,
@@ -79,133 +55,180 @@ func ConnectToPeers(
 			registry.Add(peer.Fingerprint, conn)
 			logger.Infof("Added connection to registry for peer %s", peer.Name)
 
-			hello := control.HelloMessage{
-				NodeID: identity.Fingerprint,
-				Networks: []struct {
-					Name    string `json:"name"`
-					Address string `json:"address"`
-				}{},
-				Features: map[string]bool{
-					"metrics": true,
-				},
+			stream, err := conn.OpenStreamSync(context.Background())
+			if err != nil {
+				logger.Errorf("Failed to open control stream: %v", err)
+				return
 			}
 
-			for name := range netcfg {
-				logger.Infof("Resolving address for network: %s", name)
-				addr, err := config.ResolveAddressForNetwork(name, identity.Fingerprint, netcfg)
-				if err != nil {
-					logger.Warnf("Skipping network %s: %v", name, err)
-					continue
-				}
-				logger.Infof("Resolved address for %s: %s", name, addr)
-
-				hello.Networks = append(hello.Networks, struct {
-					Name    string `json:"name"`
-					Address string `json:"address"`
-				}{
-					Name:    name,
-					Address: addr,
-				})
+			// 📨 Send Hello
+			err = control.SendHello(stream)
+			if err != nil {
+				logger.Errorf("Failed to send hello: %v", err)
+				return
 			}
 
-			logger.Infof("Sending hello to %s", peer.Name)
-			control.SendHello(conn, hello, logger)
-
-			go control.SendKeepalive(conn, logger)
-
-			logger.Infof(">>> Preparing to send route announcements using fingerprint: %s", identity.Fingerprint)
-
-			for name, net := range netcfg {
-				if !net.Export {
-					logger.Infof("Skipping network %s (export = false)", name)
-					continue
-				}
-
-				route := control.Route{
-					Prefix:    net.Prefix,
-					PeerID:    identity.Fingerprint,
-					Metric:    1,
-					ExpiresIn: 30,
-				}
-
-				logger.Infof("Announcing route for network=%s prefix=%s", name, net.Prefix)
-				control.SendRouteAnnounce(conn, name, []control.Route{route}, logger)
-			}
-
-			// 🔥 NEW: Handle incoming control streams on this connection
-			go func() {
-				logger := log.New("peer/session")
-				for {
-					stream, err := conn.AcceptStream(context.Background())
-					if err != nil {
-						logger.Warnf("Stream error from %s: %v", conn.RemoteAddr(), err)
-						return
-					}
-
-					go func(stream quic.Stream) {
-						var h control.Header
-						dec := json.NewDecoder(stream)
-						if err := dec.Decode(&h); err != nil {
-							logger.Warnf("Failed to decode stream header: %v", err)
-							_ = stream.Close()
-							return
-						}
-
-						switch h.Type {
-						case "hello":
-							logger.Infof("Unexpected duplicate hello")
-						case "route-announce":
-							var msg struct {
-								Network string          `json:"network"`
-								Routes  []control.Route `json:"routes"`
-							}
-							if err := dec.Decode(&msg); err != nil {
-								logger.Warnf("Failed to decode route-announce: %v", err)
-								_ = stream.Close()
-								return
-							}
-							logger.Infof("Received route announcement for network %v (%d routes)", msg.Network, len(msg.Routes))
-
-							for _, r := range msg.Routes {
-								control.GetRouteTable().AddRoute(netgraph.Route{ // <-- 🛠️ Use netgraph.Route
-									Prefix: r.Prefix,
-									PeerID: r.PeerID,
-									Metric: r.Metric,
-								})
-							}
-						case "route-withdraw":
-							var msg struct {
-								Network string `json:"network"`
-								Prefix  string `json:"prefix"`
-							}
-							if err := dec.Decode(&msg); err != nil {
-								logger.Warnf("Failed to decode route-withdraw: %v", err)
-								_ = stream.Close()
-								return
-							}
-							logger.Infof("Received route withdrawal for network=%s, prefix=%s", msg.Network, msg.Prefix)
-
-							control.GetRouteTable().RemoveRoute(msg.Network, msg.Prefix)
-
-						case "keepalive":
-							var msg control.KeepaliveMessage
-							if err := dec.Decode(&msg); err != nil {
-								logger.Warnf("Failed to decode keepalive: %v", err)
-								_ = stream.Close()
-								return
-							}
-							logger.Debugf("Received keepalive: %d", msg.Timestamp)
-						case "goodbye":
-							logger.Infof("Received goodbye")
-						case "metrics":
-							logger.Infof("Received metrics stream (not yet handled)")
-						default:
-							logger.Warnf("Unknown stream type: %s", h.Type)
-							stream.CancelRead(0)
-						}
-					}(stream)
-				}
-			}()
+			// 🚀 Control Loop
+			go handleControlStream(conn, stream)
 		}()
 	}
+}
+
+func handleControlStream(conn quic.Connection, stream quic.Stream) {
+	logger := log.New("peer/control")
+
+	for {
+		lenBuf := make([]byte, 2)
+		_, err := io.ReadFull(stream, lenBuf)
+		if err != nil {
+			logger.Warnf("Control stream closed: %v", err)
+			conn.CloseWithError(0, "control stream closed")
+			return
+		}
+
+		length := binary.BigEndian.Uint16(lenBuf)
+		if length == 0 || length > 4096 {
+			logger.Warnf("Invalid control message length: %d", length)
+			conn.CloseWithError(0, "invalid control message length")
+			return
+		}
+
+		msgBuf := make([]byte, length)
+		_, err = io.ReadFull(stream, msgBuf)
+		if err != nil {
+			logger.Warnf("Failed to read full control message: %v", err)
+			conn.CloseWithError(0, "invalid control payload")
+			return
+		}
+
+		controlType := msgBuf[0]
+		body := msgBuf[1:]
+
+		switch controlType {
+		case 'H':
+			logger.Infof("Received Hello from %s", conn.RemoteAddr())
+			// No-op for now
+
+		case 'A':
+			logger.Infof("Received Route-Announce from %s", conn.RemoteAddr())
+			handleRouteAnnounce(body)
+
+		case 'W':
+			logger.Infof("Received Route-Withdraw from %s", conn.RemoteAddr())
+			handleRouteWithdraw(body)
+
+		case 'K':
+			logger.Debugf("Received Keepalive from %s", conn.RemoteAddr())
+			handleKeepalive(body)
+
+		case 'G':
+			logger.Infof("Received Goodbye from %s", conn.RemoteAddr())
+			conn.CloseWithError(0, "peer sent goodbye")
+			return
+
+		default:
+			logger.Warnf("Unknown control type: %q", controlType)
+		}
+	}
+}
+
+// 👇 Properly decode a Route-Announce message
+func handleRouteAnnounce(body []byte) {
+	logger := log.New("peer/route-announce")
+
+	if len(body) < 2 {
+		logger.Warnf("Invalid route-announce body")
+		return
+	}
+
+	// First byte = network name length
+	networkLen := int(body[0])
+	if len(body) < 1+networkLen {
+		logger.Warnf("Invalid route-announce network name length")
+		return
+	}
+
+	networkName := string(body[1 : 1+networkLen])
+	logger.Infof("Route-Announce for network: %s", networkName)
+
+	cursor := 1 + networkLen
+
+	for cursor < len(body) {
+		if cursor+5 > len(body) {
+			logger.Warnf("Invalid route-announce route length")
+			return
+		}
+
+		// Parse each route
+		prefixLen := int(body[cursor])
+		prefixBytes := body[cursor+1 : cursor+1+prefixLen]
+		metric := binary.BigEndian.Uint16(body[cursor+1+prefixLen : cursor+1+prefixLen+2])
+
+		prefix := string(prefixBytes)
+		cursor += 1 + prefixLen + 2
+
+		route := netgraph.Route{
+			Network: networkName,
+			Prefix:  prefix,
+			PeerID:  "", // PeerID unknown from packet; optional.
+			Metric:  int(metric),
+		}
+
+		logger.Infof("Learned route: %+v", route)
+		control.GetRouteTable().AddRoute(route)
+	}
+}
+
+// 👇 Properly decode a Route-Withdraw message
+func handleRouteWithdraw(body []byte) {
+	logger := log.New("peer/route-withdraw")
+
+	if len(body) < 2 {
+		logger.Warnf("Invalid route-withdraw body")
+		return
+	}
+
+	// First byte = network name length
+	networkLen := int(body[0])
+	if len(body) < 1+networkLen {
+		logger.Warnf("Invalid route-withdraw network name length")
+		return
+	}
+
+	networkName := string(body[1 : 1+networkLen])
+
+	cursor := 1 + networkLen
+
+	if cursor >= len(body) {
+		logger.Warnf("Missing prefix in route-withdraw")
+		return
+	}
+
+	// Next, prefix length and prefix bytes
+	prefixLen := int(body[cursor])
+	if cursor+1+prefixLen > len(body) {
+		logger.Warnf("Invalid prefix in route-withdraw")
+		return
+	}
+
+	prefix := string(body[cursor+1 : cursor+1+prefixLen])
+
+	logger.Infof("Withdraw route network=%s, prefix=%s", networkName, prefix)
+
+	control.GetRouteTable().RemoveRoute(networkName, prefix)
+}
+
+// 👇 Properly decode a Keepalive message
+func handleKeepalive(body []byte) {
+	logger := log.New("peer/keepalive")
+
+	if len(body) < 8 {
+		logger.Warnf("Invalid keepalive payload")
+		return
+	}
+
+	timestamp := binary.BigEndian.Uint64(body)
+	t := time.Unix(int64(timestamp), 0)
+
+	logger.Debugf("Keepalive received: timestamp = %s", t.Format(time.RFC3339))
 }

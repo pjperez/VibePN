@@ -17,10 +17,10 @@ import (
 	"vibepn/metrics"
 	"vibepn/netgraph"
 	"vibepn/peer"
-	vquic "vibepn/quic" // ✅ alias YOUR OWN quic package
+	"vibepn/quic"
 	"vibepn/tun"
 
-	quic "github.com/quic-go/quic-go" // ✅ import real quic-go too
+	gquic "github.com/quic-go/quic-go" // alias to avoid confusion
 )
 
 func main() {
@@ -35,7 +35,7 @@ func main() {
 		logger.Fatalf("Failed to load config: %v", err)
 	}
 
-	vquic.SetOwnFingerprint(cfg.Identity.Fingerprint)
+	quic.SetOwnFingerprint(cfg.Identity.Fingerprint)
 
 	tlsConf, err := crypto.LoadTLS(
 		cfg.Identity.Cert,
@@ -53,12 +53,23 @@ func main() {
 	registry := peer.NewRegistry(cfg.Identity, cfg.Networks)
 
 	// Register control handlers
-	control.Register(routeTable, tracker, func(peerID, network string, route control.Route) {
+	control.Register(routeTable, tracker, func(peerID, network string, route netgraph.Route) {
 		conn := registry.Get(peerID)
 		if conn != nil {
-			control.SendRouteAnnounce(conn, network, []control.Route{route}, log.New("control/reload"))
+			stream, err := conn.OpenStreamSync(context.Background())
+			if err != nil {
+				logger.Warnf("Failed to open stream to send route-announce: %v", err)
+				return
+			}
+			defer stream.Close()
+
+			err = control.SendRouteAnnounce(stream, network, []string{route.Prefix})
+			if err != nil {
+				logger.Warnf("Failed to send route-announce: %v", err)
+			}
 		}
 	})
+
 	control.RegisterGoodbyeCallback(func() {
 		registry.DisconnectAll()
 	})
@@ -73,7 +84,7 @@ func main() {
 		dispatcher.Start(netName, d)
 	}
 
-	// Grab any device (we only support 1 for now)
+	// Grab one device (for now only supporting 1)
 	var dev *tun.Device
 	for _, d := range ifaceMgr.Devices {
 		dev = d
@@ -86,15 +97,15 @@ func main() {
 	go metrics.Serve(":9000")
 	go control.StartUDS("/var/run/vibepn.sock")
 
-	ln, err := vquic.Listen(":51820", tlsConf)
+	ln, err := quic.Listen(":51820", tlsConf)
 	if err != nil {
 		logger.Fatalf("Failed to start QUIC listener: %v", err)
 	}
 
-	go vquic.AcceptLoop(*ln, tracker, routeTable, registry, inbound)
+	go quic.AcceptLoop(*ln, tracker, routeTable, registry, inbound)
 
-	// 🧠 VERY IMPORTANT: send outbound packets when a peer connects
-	registry.SetOnConnect(func(peerID string, conn quic.Connection) {
+	// ⚡ Setup outbound sending on peer connect
+	registry.SetOnConnect(func(peerID string, conn gquic.Connection) {
 		go outbound.SendPackets(context.Background(), conn)
 	})
 

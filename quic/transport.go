@@ -3,8 +3,6 @@ package quic
 import (
 	"context"
 	"crypto/tls"
-	"encoding/binary"
-	"io"
 
 	"vibepn/forward"
 	"vibepn/log"
@@ -51,6 +49,7 @@ func AcceptLoop(
 func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 	logger := log.New("quic/session")
 
+	// Accept the first control stream
 	controlStream, err := sess.AcceptStream(context.Background())
 	if err != nil {
 		logger.Warnf("Failed to accept control stream: %v", err)
@@ -58,8 +57,10 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 	}
 	logger.Infof("Accepted control stream (id=%d)", controlStream.StreamID())
 
-	go handleControlStream(sess, controlStream)
+	// 🧠 Hand the control stream to peer
+	go peer.HandleControlStream(sess, controlStream)
 
+	// Keep accepting further raw streams
 	for {
 		stream, err := sess.AcceptStream(context.Background())
 		if err != nil {
@@ -68,37 +69,6 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 		}
 
 		go handleRawStream(stream, inbound)
-	}
-}
-
-func handleControlStream(sess quic.Connection, stream quic.Stream) {
-	logger := log.New("quic/control")
-
-	for {
-		lenBuf := make([]byte, 2)
-		_, err := io.ReadFull(stream, lenBuf)
-		if err != nil {
-			logger.Warnf("Control stream closed or error: %v", err)
-			sess.CloseWithError(0, "control stream closed")
-			return
-		}
-		length := binary.BigEndian.Uint16(lenBuf)
-
-		if length == 0 || length > 4096 {
-			logger.Warnf("Invalid control message length: %d", length)
-			sess.CloseWithError(0, "invalid control message length")
-			return
-		}
-
-		msg := make([]byte, length)
-		_, err = io.ReadFull(stream, msg)
-		if err != nil {
-			logger.Warnf("Failed to read control message: %v", err)
-			sess.CloseWithError(0, "control read error")
-			return
-		}
-
-		logger.Infof("Received control message: %x", msg)
 	}
 }
 

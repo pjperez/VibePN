@@ -69,12 +69,12 @@ func ConnectToPeers(
 			}
 
 			// 🚀 Control Loop
-			go handleControlStream(conn, stream)
+			go HandleControlStream(conn, stream)
 		}()
 	}
 }
 
-func handleControlStream(conn quic.Connection, stream quic.Stream) {
+func HandleControlStream(conn quic.Connection, stream quic.Stream) {
 	logger := log.New("peer/control")
 
 	for {

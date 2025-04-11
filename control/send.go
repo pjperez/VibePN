@@ -10,11 +10,12 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// 🚀 Send a Hello (only control type byte, no body)
-func SendHello(stream quic.Stream) error {
+func SendHello(stream quic.Stream, tieBreakerNonce uint64) error {
 	logger := log.New("control/hello")
 
-	buf := []byte{'H'} // control type 'H'
+	buf := make([]byte, 9)
+	buf[0] = 'H'
+	binary.BigEndian.PutUint64(buf[1:], tieBreakerNonce)
 
 	length := make([]byte, 2)
 	binary.BigEndian.PutUint16(length, uint16(len(buf)))
@@ -28,7 +29,7 @@ func SendHello(stream quic.Stream) error {
 		return fmt.Errorf("send hello payload: %w", err)
 	}
 
-	logger.Infof("Sent Hello")
+	logger.Infof("Sent Hello with nonce %d", tieBreakerNonce)
 	return nil
 }
 

@@ -3,6 +3,7 @@ package quic
 import (
 	"context"
 	"crypto/tls"
+	"math/rand/v2"
 
 	"vibepn/forward"
 	"vibepn/log"
@@ -59,7 +60,11 @@ func AcceptLoop(
 
 		logger.Infof("Peer fingerprint: %s", fp)
 
-		registry.Add(fp, sess)
+		// 🧠 NEW: Generate random TieBreakerNonce
+		myNonce := rand.Uint64()
+
+		// 🧠 Pass the nonce into registry.Add
+		registry.Add(fp, sess, myNonce)
 
 		go handleSession(sess, inbound, fp)
 	}

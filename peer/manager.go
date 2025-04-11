@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"math/rand/v2"
 	"time"
 
 	"vibepn/config"
@@ -52,7 +53,12 @@ func ConnectToPeers(
 			}
 			logger.Infof("✅ QUIC connection established to %s", peer.Address)
 
-			registry.Add(peer.Fingerprint, conn)
+			// 🧠 NEW: Generate random TieBreakerNonce
+			myNonce := rand.Uint64()
+
+			// 🧠 Pass it to registry.Add
+			registry.Add(peer.Fingerprint, conn, myNonce)
+
 			logger.Infof("Added connection to registry for peer %s", peer.Name)
 
 			stream, err := conn.OpenStreamSync(context.Background())
@@ -61,8 +67,8 @@ func ConnectToPeers(
 				return
 			}
 
-			// 📨 Send Hello
-			err = control.SendHello(stream)
+			// 📨 Send Hello including nonce
+			err = control.SendHello(stream, myNonce)
 			if err != nil {
 				logger.Errorf("Failed to send hello: %v", err)
 				return
@@ -85,6 +91,7 @@ func ConnectToPeers(
 			// 🚀 Start Control Loop
 			go HandleControlStream(conn, stream, peer.Fingerprint)
 		}()
+
 	}
 }
 
@@ -122,7 +129,19 @@ func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string
 		case 'H':
 			logger.Infof("Received Hello from %s", conn.RemoteAddr())
 
-			// 💥 Immediately announce our routes back!
+			// 🧠 NEW: Read 8 bytes for peer nonce
+			var nonceBytes [8]byte
+			if _, err := io.ReadFull(stream, nonceBytes[:]); err != nil {
+				logger.Warnf("Failed to read TieBreakerNonce: %v", err)
+				return
+			}
+			tieBreakerNonce := binary.BigEndian.Uint64(nonceBytes[:])
+			logger.Infof("Received TieBreakerNonce: %d", tieBreakerNonce)
+
+			// 🧠 NEW: Store it
+			storePeerNonce(peerID, tieBreakerNonce)
+
+			// 🧠 Then do your normal route-announce
 			for netName, netCfg := range control.GetNetConfig() {
 				if !netCfg.Export {
 					continue
@@ -133,7 +152,6 @@ func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string
 				}
 			}
 
-			// 🫡 Start keepalive loop
 			control.StartKeepaliveLoop(stream)
 
 		case 'A':

@@ -20,6 +20,28 @@ type Registry struct {
 	onConnect func(peerID string, conn gquic.Connection) // 🧠 NEW: callback
 }
 
+var peerNonces struct {
+	sync.Mutex
+	m map[string]uint64
+}
+
+func init() {
+	peerNonces.m = make(map[string]uint64)
+}
+
+func storePeerNonce(peerID string, nonce uint64) {
+	peerNonces.Lock()
+	defer peerNonces.Unlock()
+	peerNonces.m[peerID] = nonce
+}
+
+func getPeerNonce(peerID string) (uint64, bool) {
+	peerNonces.Lock()
+	defer peerNonces.Unlock()
+	nonce, ok := peerNonces.m[peerID]
+	return nonce, ok
+}
+
 func NewRegistry(identity config.Identity, netcfg map[string]config.NetworkConfig) *Registry {
 	return &Registry{
 		conns:    make(map[string]gquic.Connection),
@@ -29,14 +51,29 @@ func NewRegistry(identity config.Identity, netcfg map[string]config.NetworkConfi
 	}
 }
 
-func (r *Registry) Add(peerID string, conn gquic.Connection) {
+func (r *Registry) Add(peerID string, conn gquic.Connection, myNonce uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	existing := r.conns[peerID]
 	if existing != nil {
-		r.logger.Warnf("Duplicate connection for peer %s, closing old one", peerID)
-		existing.CloseWithError(0, "duplicate connection")
+		peerNonce, ok := getPeerNonce(peerID)
+		if !ok {
+			r.logger.Warnf("No peer nonce yet for %s, keeping existing connection", peerID)
+			conn.CloseWithError(0, "duplicate connection (no peer nonce)")
+			return
+		}
+
+		if myNonce < peerNonce {
+			r.logger.Warnf("Duplicate connection for peer %s, keeping outgoing (I win tie-break)", peerID)
+			existing.CloseWithError(0, "duplicate connection (loser)")
+		} else {
+			r.logger.Warnf("Duplicate connection for peer %s, keeping incoming (peer wins tie-break)", peerID)
+			conn.CloseWithError(0, "duplicate connection (loser)")
+			return
+		}
 	}
+
 	r.conns[peerID] = conn
 	r.logger.Infof("Registered connection for peer %s", peerID)
 
@@ -44,7 +81,6 @@ func (r *Registry) Add(peerID string, conn gquic.Connection) {
 		r.onConnect(peerID, conn)
 	}
 
-	// 🧠 NEW: Watch for session death
 	go func() {
 		<-conn.Context().Done()
 		r.logger.Infof("Connection to %s closed (session ended)", peerID)

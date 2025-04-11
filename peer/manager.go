@@ -2,9 +2,9 @@ package peer
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"io"
-	"math/rand/v2"
 	"time"
 
 	"vibepn/config"
@@ -16,10 +16,19 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
+func generateNonce() uint64 {
+	var b [8]byte
+	_, err := rand.Read(b[:])
+	if err != nil {
+		panic("failed to generate random nonce")
+	}
+	return binary.BigEndian.Uint64(b[:])
+}
+
 func ConnectToPeers(
 	peers []config.Peer,
 	identity config.Identity,
-	routes *netgraph.RouteTable,
+	routeTable *netgraph.RouteTable,
 	netcfg map[string]config.NetworkConfig,
 	registry *Registry,
 ) {
@@ -53,26 +62,36 @@ func ConnectToPeers(
 			}
 			logger.Infof("✅ QUIC connection established to %s", peer.Address)
 
-			// 🧠 NEW: Generate random TieBreakerNonce
-			myNonce := rand.Uint64()
-
-			// 🧠 Pass it to registry.Add
-			registry.Add(peer.Fingerprint, conn, myNonce)
-
-			logger.Infof("Added connection to registry for peer %s", peer.Name)
-
 			stream, err := conn.OpenStreamSync(context.Background())
 			if err != nil {
 				logger.Errorf("Failed to open control stream: %v", err)
+				conn.CloseWithError(0, "failed to open control stream")
 				return
 			}
 
-			// 📨 Send Hello including nonce
+			myNonce := generateNonce()
+
+			// 📨 Send Hello
 			err = control.SendHello(stream, myNonce)
 			if err != nil {
 				logger.Errorf("Failed to send hello: %v", err)
+				conn.CloseWithError(0, "failed to send hello")
 				return
 			}
+
+			var nonceBuf [8]byte
+			binary.BigEndian.PutUint64(nonceBuf[:], myNonce)
+			_, err = stream.Write(nonceBuf[:])
+			if err != nil {
+				logger.Errorf("Failed to send nonce: %v", err)
+				conn.CloseWithError(0, "failed to send nonce")
+				return
+			}
+			storePeerNonce(peer.Fingerprint, myNonce)
+
+			logger.Infof("Sent TieBreakerNonce: %d", myNonce)
+
+			registry.Add(peer.Fingerprint, conn, myNonce)
 
 			// 📢 Announce all exported routes
 			for netName, netCfg := range netcfg {
@@ -91,7 +110,6 @@ func ConnectToPeers(
 			// 🚀 Start Control Loop
 			go HandleControlStream(conn, stream, peer.Fingerprint)
 		}()
-
 	}
 }
 

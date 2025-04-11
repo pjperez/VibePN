@@ -12,32 +12,22 @@ var (
 	keepaliveInterval = 10 * time.Second // how often to send keepalive
 )
 
-func StartKeepaliveLoop(conn quic.Connection) {
+func StartKeepaliveLoop(stream quic.Stream) {
 	logger := log.New("control/keepalive")
 
 	go func() {
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+
 		for {
-			if conn.Context().Err() != nil {
-				logger.Infof("Connection closed, stopping keepalive")
-				return
-			}
+			<-ticker.C
 
-			stream, err := conn.OpenStream()
-			if err != nil {
-				logger.Warnf("Failed to open keepalive stream: %v", err)
-				time.Sleep(keepaliveInterval)
-				continue
-			}
-
-			err = SendKeepalive(stream)
+			err := SendKeepalive(stream)
 			if err != nil {
 				logger.Warnf("Failed to send keepalive: %v", err)
-				stream.CancelWrite(0)
+				return // stop loop if broken
 			}
-
-			_ = stream.Close()
-
-			time.Sleep(keepaliveInterval)
+			logger.Debugf("Sent Keepalive")
 		}
 	}()
 }

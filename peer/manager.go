@@ -80,7 +80,7 @@ func ConnectToPeers(
 			}
 
 			// 🫡 Start Keepalive loop
-			control.StartKeepaliveLoop(conn)
+			control.StartKeepaliveLoop(stream)
 
 			// 🚀 Start Control Loop
 			go HandleControlStream(conn, stream, peer.Fingerprint)
@@ -134,11 +134,11 @@ func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string
 			}
 
 			// 🫡 Start keepalive loop
-			control.StartKeepaliveLoop(conn)
+			control.StartKeepaliveLoop(stream)
 
 		case 'A':
 			logger.Infof("Received Route-Announce from %s", conn.RemoteAddr())
-			handleRouteAnnounce(body)
+			handleRouteAnnounce(body, peerID)
 
 		case 'W':
 			logger.Infof("Received Route-Withdraw from %s", conn.RemoteAddr())
@@ -160,7 +160,7 @@ func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string
 }
 
 // 👇 Properly decode a Route-Announce message
-func handleRouteAnnounce(body []byte) {
+func handleRouteAnnounce(body []byte, peerID string) {
 	logger := log.New("peer/route-announce")
 
 	if len(body) < 2 {
@@ -195,7 +195,7 @@ func handleRouteAnnounce(body []byte) {
 		route := netgraph.Route{
 			Network: networkName,
 			Prefix:  prefix,
-			PeerID:  "", // PeerID unknown from packet; optional.
+			PeerID:  peerID,
 			Metric:  int(metric),
 		}
 

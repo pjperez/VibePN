@@ -32,6 +32,11 @@ func NewRegistry(identity config.Identity, netcfg map[string]config.NetworkConfi
 func (r *Registry) Add(peerID string, conn gquic.Connection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	existing := r.sessions[peerID]
+	if existing != nil {
+		r.logger.Warnf("Duplicate connection for peer %s, closing old one", peerID)
+		existing.CloseWithError(0, "duplicate connection")
+	}
 	r.conns[peerID] = conn
 	r.logger.Infof("Registered connection for peer %s", peerID)
 

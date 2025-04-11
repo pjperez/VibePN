@@ -9,6 +9,7 @@ import (
 
 type PeerLister interface {
 	ListPeers() []shared.PeerState
+	UpdatePeer(peerID string)
 }
 
 type PeerSendFunc func(peerID, network string, route netgraph.Route)

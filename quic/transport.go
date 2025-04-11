@@ -9,6 +9,9 @@ import (
 	"vibepn/netgraph"
 	"vibepn/peer"
 
+	"crypto/sha256"
+	"encoding/hex"
+
 	"github.com/quic-go/quic-go"
 )
 
@@ -42,11 +45,33 @@ func AcceptLoop(
 
 		logger.Infof("Accepted connection from %s", sess.RemoteAddr())
 
-		go handleSession(sess, inbound)
+		// 🧠 Extract fingerprint
+		connState := sess.ConnectionState()
+		if len(connState.TLS.PeerCertificates) == 0 {
+			logger.Warnf("No peer certificate presented")
+			_ = sess.CloseWithError(0, "missing peer cert")
+			continue
+		}
+		peerCert := connState.TLS.PeerCertificates[0]
+
+		// SHA256 fingerprint
+		fp := FingerprintCertificate(peerCert.Raw)
+
+		logger.Infof("Peer fingerprint: %s", fp)
+
+		registry.Add(fp, sess)
+
+		go handleSession(sess, inbound, fp)
 	}
 }
 
-func handleSession(sess quic.Connection, inbound *forward.Inbound) {
+func FingerprintCertificate(cert []byte) string {
+	sum := sha256.Sum256(cert)
+	return hex.EncodeToString(sum[:])
+}
+
+func handleSession(sess quic.Connection, inbound *forward.Inbound, fingerprint string) {
+
 	logger := log.New("quic/session")
 
 	// Accept the first control stream
@@ -58,7 +83,7 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound) {
 	logger.Infof("Accepted control stream (id=%d)", controlStream.StreamID())
 
 	// 🧠 Hand the control stream to peer
-	go peer.HandleControlStream(sess, controlStream)
+	go peer.HandleControlStream(sess, controlStream, fingerprint)
 
 	// Keep accepting further raw streams
 	for {

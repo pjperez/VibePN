@@ -36,8 +36,15 @@ func (r *Registry) Add(peerID string, conn gquic.Connection) {
 	r.logger.Infof("Registered connection for peer %s", peerID)
 
 	if r.onConnect != nil {
-		r.onConnect(peerID, conn) // 🧠 Trigger outbound sender
+		r.onConnect(peerID, conn)
 	}
+
+	// 🧠 NEW: Watch for session death
+	go func() {
+		<-conn.Context().Done()
+		r.logger.Infof("Connection to %s closed (session ended)", peerID)
+		r.Remove(peerID)
+	}()
 }
 
 func (r *Registry) Remove(peerID string) {

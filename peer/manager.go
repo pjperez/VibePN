@@ -83,12 +83,12 @@ func ConnectToPeers(
 			control.StartKeepaliveLoop(conn)
 
 			// 🚀 Start Control Loop
-			go HandleControlStream(conn, stream)
+			go HandleControlStream(conn, stream, peer.Fingerprint)
 		}()
 	}
 }
 
-func HandleControlStream(conn quic.Connection, stream quic.Stream) {
+func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string) {
 	logger := log.New("peer/control")
 
 	for {
@@ -133,7 +133,7 @@ func HandleControlStream(conn quic.Connection, stream quic.Stream) {
 
 		case 'K':
 			logger.Debugf("Received Keepalive from %s", conn.RemoteAddr())
-			handleKeepalive(body)
+			handleKeepalive(body, peerID)
 
 		case 'G':
 			logger.Infof("Received Goodbye from %s", conn.RemoteAddr())
@@ -228,8 +228,7 @@ func handleRouteWithdraw(body []byte) {
 	control.GetRouteTable().RemoveRoute(networkName, prefix)
 }
 
-// 👇 Properly decode a Keepalive message
-func handleKeepalive(body []byte) {
+func handleKeepalive(body []byte, peerID string) {
 	logger := log.New("peer/keepalive")
 
 	if len(body) < 8 {
@@ -241,4 +240,8 @@ func handleKeepalive(body []byte) {
 	t := time.Unix(int64(timestamp), 0)
 
 	logger.Debugf("Keepalive received: timestamp = %s", t.Format(time.RFC3339))
+
+	// 🔥 Mark the peer as alive
+	control.GetPeerTracker().UpdatePeer(peerID)
+	logger.Debugf("Updated liveness for peer %s", peerID)
 }

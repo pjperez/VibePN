@@ -58,10 +58,17 @@ func saveTOFU() {
 	}
 }
 
-func LoadPeerTLSWithTOFU(peerName string, address string) (*tls.Config, error) {
+func LoadPeerTLSWithTOFU(peerName string, address string, certPath string, keyPath string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load cert/key: %w", err)
+	}
+
 	return &tls.Config{
+		Certificates:          []tls.Certificate{cert}, // ← 🧠 Present your cert
 		InsecureSkipVerify:    true,
 		VerifyPeerCertificate: verifyTOFU(peerName, address),
+		NextProtos:            []string{"vibepn"}, // ← 🧠 Needed for QUIC
 	}, nil
 }
 

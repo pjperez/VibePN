@@ -34,7 +34,7 @@ func ConnectToPeers(
 		go func() {
 			logger.Infof("Started goroutine for peer %s (%s)", peer.Name, peer.Address)
 
-			tlsConf, err := crypto.LoadPeerTLSWithTOFU(peer.Name, peer.Address)
+			tlsConf, err := crypto.LoadPeerTLSWithTOFU(peer.Name, peer.Address, identity.Cert, identity.Key)
 			if err != nil {
 				logger.Errorf("Failed to create TLS config for %s: %v", peer.Name, err)
 				return

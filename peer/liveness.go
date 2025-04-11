@@ -74,7 +74,7 @@ func (t *LivenessTracker) StartWatcher(rt *netgraph.RouteTable) {
 			for _, id := range expired {
 				logger.Warnf("Peer %s considered dead (timeout)", id)
 				delete(t.peers, id)
-				rt.RemoveRoutesForPeer(id)
+				rt.RemoveByPeer(id)
 			}
 			t.mu.Unlock()
 		}

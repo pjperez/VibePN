@@ -12,12 +12,13 @@ import (
 )
 
 type Registry struct {
-	mu        sync.RWMutex
-	conns     map[string]gquic.Connection // peerID → connection
-	logger    *log.Logger
-	identity  config.Identity
-	netcfg    map[string]config.NetworkConfig
-	onConnect func(peerID string, conn gquic.Connection) // 🧠 NEW: callback
+	mu           sync.RWMutex
+	conns        map[string]gquic.Connection // peerID → connection
+	logger       *log.Logger
+	identity     config.Identity
+	netcfg       map[string]config.NetworkConfig
+	onConnect    func(peerID string, conn gquic.Connection) // 🧠 callback on new connection
+	onDisconnect func(peerID string)                        // 🧠 NEW: callback on full disconnect
 }
 
 var peerNonces struct {
@@ -84,28 +85,31 @@ func (r *Registry) Add(peerID string, conn gquic.Connection, myNonce uint64) {
 	go func() {
 		<-conn.Context().Done()
 		r.logger.Infof("Connection to %s closed (session ended)", peerID)
-
-		r.mu.Lock()
-		defer r.mu.Unlock()
-
-		// Only remove if the closed connection is still the current one
-		existing := r.conns[peerID]
-		if existing == conn {
-			r.logger.Infof("Removing connection for peer %s", peerID)
-			delete(r.conns, peerID)
-		} else {
-			r.logger.Infof("Closed connection was not active for peer %s, keeping current connection", peerID)
-		}
+		r.removeConnection(peerID, conn)
 	}()
-
 }
 
-func (r *Registry) Remove(peerID string) {
+// 🧠 Internal: remove a connection safely
+func (r *Registry) removeConnection(peerID string, closedConn gquic.Connection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.conns, peerID)
-	r.logger.Infof("Removed connection for peer %s", peerID)
+
+	existing := r.conns[peerID]
+	if existing == closedConn {
+		r.logger.Infof("Removing connection for peer %s", peerID)
+		delete(r.conns, peerID)
+
+		// 🧠 Only if no connection left, trigger onDisconnect
+		if r.onDisconnect != nil {
+			r.onDisconnect(peerID)
+		}
+	} else {
+		r.logger.Infof("Closed connection was not active for peer %s, keeping current connection", peerID)
+	}
 }
+
+// 🔥 NO DIRECT CALL TO Remove() ANYMORE EXTERNALLY
+// 🔥 use removeConnection inside connection watcher
 
 func (r *Registry) Get(peerID string) gquic.Connection {
 	r.mu.RLock()
@@ -128,7 +132,7 @@ func (r *Registry) DisconnectAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for peerID, conn := range r.conns {
-		// 🔥 FIX: Open a stream for sending Goodbye
+		// 🔥 Try to say Goodbye before closing
 		stream, err := conn.OpenStreamSync(context.Background())
 		if err == nil {
 			_ = control.SendGoodbye(stream)
@@ -151,9 +155,15 @@ func (r *Registry) NetConfig() map[string]config.NetworkConfig {
 	return r.netcfg
 }
 
-// 🧠 NEW: set callback to trigger when a peer connects
 func (r *Registry) SetOnConnect(cb func(peerID string, conn gquic.Connection)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onConnect = cb
+}
+
+// 🧠 NEW: set callback when peer fully disconnected
+func (r *Registry) SetOnDisconnect(cb func(peerID string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onDisconnect = cb
 }

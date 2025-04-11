@@ -40,7 +40,8 @@ func (rt *RouteTable) AddRoute(r Route) {
 	rt.routes[r.Network] = append(list, r)
 }
 
-func (rt *RouteTable) RemoveRoutesForPeer(peerID string) {
+// ✅ Rename this so main.go matches (main expects RemoveByPeer not RemoveRoutesForPeer)
+func (rt *RouteTable) RemoveByPeer(peerID string) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
@@ -100,4 +101,15 @@ func (rt *RouteTable) AllRoutes() []Route {
 		}
 	}
 	return all
+}
+
+// ✅ Add this convenience for learning routes easily
+func (rt *RouteTable) AddLearnedRoute(network, prefix, peerID string) {
+	rt.AddRoute(Route{
+		Network:   network,
+		Prefix:    prefix,
+		PeerID:    peerID,
+		Metric:    1,           // 🧠 You can tune metric later
+		ExpiresAt: time.Time{}, // 🧠 No expiry yet
+	})
 }

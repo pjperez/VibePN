@@ -55,6 +55,10 @@ func main() {
 
 	registry := peer.NewRegistry(cfg.Identity, cfg.Networks)
 
+	registry.SetOnDisconnect(func(peerID string) {
+		routeTable.RemoveByPeer(peerID)
+	})
+
 	// Register control handlers
 	control.Register(routeTable, tracker, func(peerID, network string, route netgraph.Route) {
 		conn := registry.Get(peerID)

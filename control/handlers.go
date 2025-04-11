@@ -99,7 +99,7 @@ func Handle(cmd string, _ json.RawMessage, logger *log.Logger) CommandResponse {
 		// 🧠 If passed, apply
 		routeTable := GetRouteTable()
 		peerTracker := GetPeerTracker()
-		routeTable.RemoveRoutesForPeer(cfg.Identity.Fingerprint)
+		routeTable.RemoveByPeer(cfg.Identity.Fingerprint)
 
 		for name, net := range cfg.Networks {
 			route := netgraph.Route{

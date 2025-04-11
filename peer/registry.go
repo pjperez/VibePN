@@ -84,8 +84,20 @@ func (r *Registry) Add(peerID string, conn gquic.Connection, myNonce uint64) {
 	go func() {
 		<-conn.Context().Done()
 		r.logger.Infof("Connection to %s closed (session ended)", peerID)
-		r.Remove(peerID)
+
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		// Only remove if the closed connection is still the current one
+		existing := r.conns[peerID]
+		if existing == conn {
+			r.logger.Infof("Removing connection for peer %s", peerID)
+			delete(r.conns, peerID)
+		} else {
+			r.logger.Infof("Closed connection was not active for peer %s, keeping current connection", peerID)
+		}
 	}()
+
 }
 
 func (r *Registry) Remove(peerID string) {

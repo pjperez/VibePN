@@ -3,6 +3,7 @@ package control
 import (
 	"time"
 
+	"vibepn/config"
 	"vibepn/netgraph"
 	"vibepn/shared"
 )
@@ -22,6 +23,12 @@ var (
 	goodbyeFunc GoodbyeFunc
 	startupTime = time.Now()
 )
+
+var netConfig map[string]config.NetworkConfig
+
+func GetNetConfig() map[string]config.NetworkConfig {
+	return netConfig
+}
 
 func Register(rt *netgraph.RouteTable, pt PeerLister, sr PeerSendFunc) {
 	routeTable = rt

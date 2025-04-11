@@ -129,19 +129,17 @@ func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string
 		case 'H':
 			logger.Infof("Received Hello from %s", conn.RemoteAddr())
 
-			// 🧠 NEW: Read 8 bytes for peer nonce
-			var nonceBytes [8]byte
-			if _, err := io.ReadFull(stream, nonceBytes[:]); err != nil {
-				logger.Warnf("Failed to read TieBreakerNonce: %v", err)
+			// 🧠 Read 8 bytes for TieBreakerNonce from the body
+			if len(body) < 8 {
+				logger.Warnf("Hello payload too short")
 				return
 			}
-			tieBreakerNonce := binary.BigEndian.Uint64(nonceBytes[:])
+			tieBreakerNonce := binary.BigEndian.Uint64(body[:8])
 			logger.Infof("Received TieBreakerNonce: %d", tieBreakerNonce)
 
-			// 🧠 NEW: Store it
 			storePeerNonce(peerID, tieBreakerNonce)
 
-			// 🧠 Then do your normal route-announce
+			// 🧠 Announce exported routes
 			for netName, netCfg := range control.GetNetConfig() {
 				if !netCfg.Export {
 					continue

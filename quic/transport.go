@@ -76,7 +76,6 @@ func FingerprintCertificate(cert []byte) string {
 }
 
 func handleSession(sess quic.Connection, inbound *forward.Inbound, fingerprint string) {
-
 	logger := log.New("quic/session")
 
 	// Accept the first control stream
@@ -87,7 +86,7 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound, fingerprint s
 	}
 	logger.Infof("Accepted control stream (id=%d)", controlStream.StreamID())
 
-	// 🧠 Hand the control stream to peer
+	// 🧠 VERY IMPORTANT: Start control logic
 	go peer.HandleControlStream(sess, controlStream, fingerprint)
 
 	// Keep accepting further raw streams

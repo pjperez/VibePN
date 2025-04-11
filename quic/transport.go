@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"math/rand/v2"
 
+	"vibepn/control"
 	"vibepn/forward"
 	"vibepn/log"
 	"vibepn/netgraph"
@@ -85,6 +86,25 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound, fingerprint s
 		return
 	}
 	logger.Infof("Accepted control stream (id=%d)", controlStream.StreamID())
+
+	// 🧠 Immediately send Hello with my nonce (generate one)
+	myNonce := rand.Uint64()
+	err = control.SendHello(controlStream, myNonce)
+	if err != nil {
+		logger.Errorf("Failed to send Hello on incoming control stream: %v", err)
+		return
+	}
+
+	// 🧠 Immediately announce exported routes
+	for netName, netCfg := range control.GetNetConfig() {
+		if !netCfg.Export {
+			continue
+		}
+		err := control.SendRouteAnnounce(controlStream, netName, []string{netCfg.Prefix})
+		if err != nil {
+			logger.Warnf("Failed to announce route for network %s: %v", netName, err)
+		}
+	}
 
 	// 🧠 VERY IMPORTANT: Start control logic
 	go peer.HandleControlStream(sess, controlStream, fingerprint)

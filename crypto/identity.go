@@ -28,6 +28,7 @@ func LoadTLS(certPath, keyPath, expectedFP string) (*tls.Config, error) {
 
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"vibepn/0.1"},
 	}
 	return tlsConf, nil
 }

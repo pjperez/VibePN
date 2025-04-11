@@ -68,7 +68,7 @@ func LoadPeerTLSWithTOFU(peerName string, address string, certPath string, keyPa
 		Certificates:          []tls.Certificate{cert}, // ← 🧠 Present your cert
 		InsecureSkipVerify:    true,
 		VerifyPeerCertificate: verifyTOFU(peerName, address),
-		NextProtos:            []string{"vibepn"}, // ← 🧠 Needed for QUIC
+		NextProtos:            []string{"vibepn/0.1"}, // ← 🧠 Needed for QUIC
 	}, nil
 }
 

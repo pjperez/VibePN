@@ -121,7 +121,20 @@ func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string
 		switch controlType {
 		case 'H':
 			logger.Infof("Received Hello from %s", conn.RemoteAddr())
-			// No-op for now
+
+			// 💥 Immediately announce our routes back!
+			for netName, netCfg := range control.GetNetConfig() {
+				if !netCfg.Export {
+					continue
+				}
+				err := control.SendRouteAnnounce(stream, netName, []string{netCfg.Prefix})
+				if err != nil {
+					logger.Warnf("Failed to announce route for network %s: %v", netName, err)
+				}
+			}
+
+			// 🫡 Start keepalive loop
+			control.StartKeepaliveLoop(conn)
 
 		case 'A':
 			logger.Infof("Received Route-Announce from %s", conn.RemoteAddr())

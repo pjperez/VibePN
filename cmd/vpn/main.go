@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"os"
 	"os/signal"
@@ -45,6 +46,8 @@ func main() {
 	if err != nil {
 		logger.Fatalf("Failed to load TLS identity: %v", err)
 	}
+
+	tlsConf.ClientAuth = tls.RequireAnyClientCert
 
 	routeTable := netgraph.NewRouteTable()
 	tracker := peer.NewLivenessTracker(30 * time.Second)

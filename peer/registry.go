@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"sync"
+	"time"
 
 	"vibepn/config"
 	"vibepn/control"
@@ -133,7 +134,9 @@ func (r *Registry) DisconnectAll() {
 	defer r.mu.Unlock()
 	for peerID, conn := range r.conns {
 		// 🔥 Try to say Goodbye before closing
-		stream, err := conn.OpenStreamSync(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		stream, err := conn.OpenStreamSync(ctx)
+		cancel()
 		if err == nil {
 			_ = control.SendGoodbye(stream)
 			_ = stream.Close()

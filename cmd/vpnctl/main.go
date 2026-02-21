@@ -23,7 +23,7 @@ type CommandResponse struct {
 func main() {
 	jsonMode := flag.Bool("json", false, "Output raw JSON")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [--json] <status|routes|peers>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [--json] <status|routes|peers|reload|goodbye>\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()

@@ -126,7 +126,7 @@ func handleRawStream(stream quic.Stream, inbound *forward.Inbound) {
 	logger.Debugf("Raw stream accepted (id=%d)", stream.StreamID())
 
 	if inbound != nil {
-		go inbound.HandleRawStream(stream, "")
+		go inbound.HandleRawStream(stream)
 	} else {
 		logger.Warnf("Inbound handler not configured, dropping stream")
 		stream.CancelRead(0)

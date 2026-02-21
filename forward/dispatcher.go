@@ -2,8 +2,9 @@ package forward
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/binary"
 	"net"
+	"time"
 
 	"vibepn/log"
 	"vibepn/netgraph"
@@ -56,24 +57,38 @@ func (d *Dispatcher) Start(network string, dev *tun.Device) {
 				continue
 			}
 
-			stream, err := conn.OpenStreamSync(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			stream, err := conn.OpenStreamSync(ctx)
+			cancel()
 			if err != nil {
 				d.Logger.Warnf("[%s] Failed to open stream to peer %s: %v", network, route.PeerID, err)
 				continue
 			}
 
-			// Write stream header
-			header := map[string]string{
-				"type":    "raw",
-				"network": network,
-			}
-			if err := json.NewEncoder(stream).Encode(header); err != nil {
-				d.Logger.Warnf("[%s] Failed to write stream header: %v", network, err)
+			if len(network) > 255 {
+				d.Logger.Warnf("[%s] Network name too long: %d", network, len(network))
 				stream.Close()
 				continue
 			}
 
-			// Write packet
+			if len(pkt) > 0xFFFF {
+				d.Logger.Warnf("[%s] Packet too large: %d bytes", network, len(pkt))
+				stream.Close()
+				continue
+			}
+
+			header := make([]byte, 1+len(network)+2)
+			header[0] = byte(len(network))
+			copy(header[1:], network)
+			binary.BigEndian.PutUint16(header[1+len(network):], uint16(len(pkt)))
+
+			_, err = stream.Write(header)
+			if err != nil {
+				d.Logger.Warnf("[%s] Failed to write packet header: %v", network, err)
+				stream.Close()
+				continue
+			}
+
 			_, err = stream.Write(pkt)
 			if err != nil {
 				d.Logger.Warnf("[%s] Failed to write to stream: %v", network, err)

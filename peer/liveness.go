@@ -10,13 +10,19 @@ import (
 )
 
 type LivenessTracker struct {
-	mu    sync.Mutex
-	peers map[string]shared.PeerState // ✅ Always shared.PeerState
+	mu      sync.Mutex
+	peers   map[string]shared.PeerState // ✅ Always shared.PeerState
+	timeout time.Duration
 }
 
 func NewLivenessTracker(timeout time.Duration) *LivenessTracker {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
 	return &LivenessTracker{
-		peers: make(map[string]shared.PeerState), // ✅ Always shared.PeerState
+		peers:   make(map[string]shared.PeerState), // ✅ Always shared.PeerState
+		timeout: timeout,
 	}
 }
 
@@ -66,7 +72,7 @@ func (t *LivenessTracker) StartWatcher(rt *netgraph.RouteTable) {
 			expired := []string{}
 
 			for id, peer := range t.peers {
-				if now.Sub(peer.LastSeen) > 30*time.Second {
+				if now.Sub(peer.LastSeen) > t.timeout {
 					expired = append(expired, id)
 				}
 			}

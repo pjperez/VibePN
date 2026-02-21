@@ -10,30 +10,51 @@ import (
 )
 
 type Inbound struct {
-	dev    tun.Device
-	logger *log.Logger
+	devices map[string]*tun.Device
+	logger  *log.Logger
 }
 
-func NewInbound(dev tun.Device) *Inbound {
+func NewInbound(devices map[string]*tun.Device) *Inbound {
 	return &Inbound{
-		dev:    dev,
-		logger: log.New("forward/inbound"),
+		devices: devices,
+		logger:  log.New("forward/inbound"),
 	}
 }
 
-func (i *Inbound) HandleRawStream(stream quic.Stream, _ string) {
+func (i *Inbound) HandleRawStream(stream quic.Stream) {
 	i.logger.Infof("Handling raw stream %d", stream.StreamID())
 
 	for {
-		// ✍️ Read 2 bytes for packet length
-		lenBuf := make([]byte, 2)
-		_, err := io.ReadFull(stream, lenBuf)
+		netLenBuf := make([]byte, 1)
+		_, err := io.ReadFull(stream, netLenBuf)
 		if err != nil {
 			if err == io.EOF {
 				i.logger.Infof("Raw stream closed (id=%d)", stream.StreamID())
 			} else {
 				i.logger.Warnf("Failed to read packet length: %v", err)
 			}
+			return
+		}
+
+		networkLen := int(netLenBuf[0])
+		if networkLen == 0 {
+			i.logger.Warnf("Invalid network name length: %d", networkLen)
+			return
+		}
+
+		networkBuf := make([]byte, networkLen)
+		_, err = io.ReadFull(stream, networkBuf)
+		if err != nil {
+			i.logger.Warnf("Failed to read network name: %v", err)
+			return
+		}
+		network := string(networkBuf)
+
+		// ✍️ Read 2 bytes for packet length
+		lenBuf := make([]byte, 2)
+		_, err = io.ReadFull(stream, lenBuf)
+		if err != nil {
+			i.logger.Warnf("Failed to read packet length: %v", err)
 			return
 		}
 
@@ -52,9 +73,15 @@ func (i *Inbound) HandleRawStream(stream quic.Stream, _ string) {
 			return
 		}
 
-		_, err = i.dev.Write(packet)
+		dev, ok := i.devices[network]
+		if !ok || dev == nil {
+			i.logger.Warnf("No local interface for network %s", network)
+			continue
+		}
+
+		_, err = dev.Write(packet)
 		if err != nil {
-			i.logger.Warnf("Failed to write packet to TUN: %v", err)
+			i.logger.Warnf("Failed to write packet to TUN for network %s: %v", network, err)
 			return
 		}
 	}

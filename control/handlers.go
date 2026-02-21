@@ -54,7 +54,7 @@ func Handle(cmd string, _ json.RawMessage, logger *log.Logger) CommandResponse {
 		return CommandResponse{Status: "ok", Output: resp}
 
 	case "reload":
-		cfg, err := config.Load("~/.vibepn/config.toml")
+		cfg, err := config.Load(GetConfigPath())
 		if err != nil {
 			return CommandResponse{
 				Status: "error",
@@ -97,6 +97,7 @@ func Handle(cmd string, _ json.RawMessage, logger *log.Logger) CommandResponse {
 		}
 
 		// 🧠 If passed, apply
+		RegisterNetConfig(cfg.Networks)
 		routeTable := GetRouteTable()
 		peerTracker := GetPeerTracker()
 		routeTable.RemoveByPeer(cfg.Identity.Fingerprint)

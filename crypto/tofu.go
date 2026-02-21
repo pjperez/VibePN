@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"vibepn/log"
 )
@@ -81,6 +82,13 @@ func verifyTOFU(peerName, address string) func(rawCerts [][]byte, verifiedChains
 		cert, err := x509.ParseCertificate(rawCerts[0])
 		if err != nil {
 			return fmt.Errorf("failed to parse peer certificate: %v", err)
+		}
+		now := time.Now()
+		if now.Before(cert.NotBefore) {
+			return fmt.Errorf("peer certificate not valid before %s", cert.NotBefore.Format(time.RFC3339))
+		}
+		if now.After(cert.NotAfter) {
+			return fmt.Errorf("peer certificate expired at %s", cert.NotAfter.Format(time.RFC3339))
 		}
 
 		fp := sha256.Sum256(cert.Raw)

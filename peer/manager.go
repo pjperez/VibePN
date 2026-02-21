@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"time"
 
@@ -16,13 +17,13 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-func generateNonce() uint64 {
+func generateNonce() (uint64, error) {
 	var b [8]byte
 	_, err := rand.Read(b[:])
 	if err != nil {
-		panic("failed to generate random nonce")
+		return 0, fmt.Errorf("failed to generate random nonce: %w", err)
 	}
-	return binary.BigEndian.Uint64(b[:])
+	return binary.BigEndian.Uint64(b[:]), nil
 }
 
 func ConnectToPeers(
@@ -62,14 +63,21 @@ func ConnectToPeers(
 			}
 			logger.Infof("✅ QUIC connection established to %s", peer.Address)
 
-			stream, err := conn.OpenStreamSync(context.Background())
+			streamCtx, streamCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			stream, err := conn.OpenStreamSync(streamCtx)
+			streamCancel()
 			if err != nil {
 				logger.Errorf("Failed to open control stream: %v", err)
 				conn.CloseWithError(0, "failed to open control stream")
 				return
 			}
 
-			myNonce := generateNonce()
+			myNonce, err := generateNonce()
+			if err != nil {
+				logger.Errorf("Failed to generate nonce: %v", err)
+				conn.CloseWithError(0, "failed to generate nonce")
+				return
+			}
 
 			// 📨 Send Hello
 			err = control.SendHello(stream, myNonce)
@@ -79,14 +87,6 @@ func ConnectToPeers(
 				return
 			}
 
-			var nonceBuf [8]byte
-			binary.BigEndian.PutUint64(nonceBuf[:], myNonce)
-			_, err = stream.Write(nonceBuf[:])
-			if err != nil {
-				logger.Errorf("Failed to send nonce: %v", err)
-				conn.CloseWithError(0, "failed to send nonce")
-				return
-			}
 			storePeerNonce(peer.Fingerprint, myNonce)
 
 			logger.Infof("Sent TieBreakerNonce: %d", myNonce)

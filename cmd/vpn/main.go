@@ -19,9 +19,6 @@ import (
 	"vibepn/netgraph"
 	"vibepn/peer"
 	"vibepn/quic"
-	"vibepn/tun"
-
-	gquic "github.com/quic-go/quic-go" // alias to avoid confusion
 )
 
 func main() {
@@ -63,7 +60,9 @@ func main() {
 	control.Register(routeTable, tracker, func(peerID, network string, route netgraph.Route) {
 		conn := registry.Get(peerID)
 		if conn != nil {
-			stream, err := conn.OpenStreamSync(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			stream, err := conn.OpenStreamSync(ctx)
+			cancel()
 			if err != nil {
 				logger.Warnf("Failed to open stream to send route-announce: %v", err)
 				return
@@ -76,6 +75,8 @@ func main() {
 			}
 		}
 	})
+	control.RegisterNetConfig(cfg.Networks)
+	control.RegisterConfigPath(configPath)
 
 	control.RegisterGoodbyeCallback(func() {
 		registry.DisconnectAll()
@@ -85,21 +86,16 @@ func main() {
 	if err != nil {
 		logger.Fatalf("Interface setup failed: %v", err)
 	}
+	if len(ifaceMgr.Devices) == 0 {
+		logger.Fatalf("No network interfaces were initialized from config")
+	}
 
 	dispatcher := forward.NewDispatcher(routeTable, ifaceMgr.Devices, registry)
 	for netName, d := range ifaceMgr.Devices {
 		dispatcher.Start(netName, d)
 	}
 
-	// Grab one device (for now only supporting 1)
-	var dev *tun.Device
-	for _, d := range ifaceMgr.Devices {
-		dev = d
-		break
-	}
-
-	inbound := forward.NewInbound(*dev)
-	outbound := forward.NewOutbound(*dev)
+	inbound := forward.NewInbound(ifaceMgr.Devices)
 
 	go metrics.Serve(":9000")
 	go control.StartUDS("/var/run/vibepn.sock")
@@ -110,11 +106,6 @@ func main() {
 	}
 
 	go quic.AcceptLoop(*ln, tracker, routeTable, registry, inbound)
-
-	// ⚡ Setup outbound sending on peer connect
-	registry.SetOnConnect(func(peerID string, conn gquic.Connection) {
-		go outbound.SendPackets(context.Background(), conn)
-	})
 
 	peer.ConnectToPeers(cfg.Peers, cfg.Identity, routeTable, cfg.Networks, registry)
 

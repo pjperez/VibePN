@@ -47,6 +47,28 @@ go test ./path/to/package -run TestName
 ./vpn -config /etc/vibepn/config.toml
 ```
 
+## Run as a systemd service
+
+```bash
+# Build and install the daemon binary.
+go build -o vpn ./cmd/vpn
+sudo install -m 0755 vpn /usr/local/bin/vpn
+
+# Install config and unit file.
+sudo install -d -m 0755 /etc/vibepn
+sudo install -m 0644 example/config.toml /etc/vibepn/config.toml
+sudo install -m 0644 example/systemd/vibepn.service /etc/systemd/system/vibepn.service
+
+# Create dedicated service account (if needed).
+sudo getent group vibepn >/dev/null || sudo groupadd --system vibepn
+sudo id -u vibepn >/dev/null 2>&1 || sudo useradd --system --gid vibepn --home /var/lib/vibepn --shell /usr/sbin/nologin vibepn
+
+# Reload units and start on boot.
+sudo systemctl daemon-reload
+sudo systemctl enable vibepn
+sudo systemctl start vibepn
+```
+
 Control CLI (via Unix socket `/var/run/vibepn.sock`):
 
 ```bash
@@ -110,6 +132,6 @@ For full implementation detail and subsystem-by-subsystem completeness status, s
 ## Known Gaps
 
 - Test coverage is still very limited (currently only `config/address` tests).
-- Peer reconnect/backoff strategy is not implemented.
+- Peer reconnect exists but remains basic and lacks richer failure classification/backoff tuning.
 - `reload` revalidates/re-announces routes but does not reinitialize interfaces, peers, or listeners.
-- CI workflow is not yet configured.
+- Route-policy enforcement for peer announcements is not yet implemented.

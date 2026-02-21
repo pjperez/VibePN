@@ -34,6 +34,10 @@ func ConnectToPeers(
 	registry *Registry,
 ) {
 	logger := log.New("peer/manager")
+	const (
+		initialReconnectBackoff = 2 * time.Second
+		maxReconnectBackoff     = 30 * time.Second
+	)
 
 	logger.Infof("identity.Fingerprint = %q", identity.Fingerprint)
 	logger.Infof("netcfg contents: %+v", netcfg)
@@ -52,63 +56,82 @@ func ConnectToPeers(
 			}
 			logger.Infof("TLS config created for peer %s", peer.Name)
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			logger.Infof("Dialing QUIC to %s...", peer.Address)
-			conn, err := quic.DialAddr(ctx, peer.Address, tlsConf, nil)
-			if err != nil {
-				logger.Errorf("❌ QUIC dial to %s failed: %v", peer.Address, err)
-				return
-			}
-			logger.Infof("✅ QUIC connection established to %s", peer.Address)
-
-			streamCtx, streamCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			stream, err := conn.OpenStreamSync(streamCtx)
-			streamCancel()
-			if err != nil {
-				logger.Errorf("Failed to open control stream: %v", err)
-				conn.CloseWithError(0, "failed to open control stream")
-				return
+			reconnectBackoff := initialReconnectBackoff
+			waitBeforeRetry := func(reason string, err error) {
+				logger.Warnf("%s: %v (retrying in %s)", reason, err, reconnectBackoff)
+				time.Sleep(reconnectBackoff)
+				reconnectBackoff *= 2
+				if reconnectBackoff > maxReconnectBackoff {
+					reconnectBackoff = maxReconnectBackoff
+				}
 			}
 
-			myNonce, err := generateNonce()
-			if err != nil {
-				logger.Errorf("Failed to generate nonce: %v", err)
-				conn.CloseWithError(0, "failed to generate nonce")
-				return
-			}
+			for {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
-			// 📨 Send Hello
-			err = control.SendHello(stream, myNonce)
-			if err != nil {
-				logger.Errorf("Failed to send hello: %v", err)
-				conn.CloseWithError(0, "failed to send hello")
-				return
-			}
-
-			storePeerNonce(peer.Fingerprint, myNonce)
-
-			logger.Infof("Sent TieBreakerNonce: %d", myNonce)
-
-			registry.Add(peer.Fingerprint, conn, myNonce)
-
-			// 📢 Announce all exported routes
-			for netName, netCfg := range netcfg {
-				if !netCfg.Export {
+				logger.Infof("Dialing QUIC to %s...", peer.Address)
+				conn, err := quic.DialAddr(ctx, peer.Address, tlsConf, nil)
+				cancel()
+				if err != nil {
+					waitBeforeRetry(fmt.Sprintf("❌ QUIC dial to %s failed", peer.Address), err)
 					continue
 				}
-				err = control.SendRouteAnnounce(stream, netName, []string{netCfg.Prefix})
+				logger.Infof("✅ QUIC connection established to %s", peer.Address)
+
+				streamCtx, streamCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				stream, err := conn.OpenStreamSync(streamCtx)
+				streamCancel()
 				if err != nil {
-					logger.Warnf("Failed to announce route for network %s: %v", netName, err)
+					conn.CloseWithError(0, "failed to open control stream")
+					waitBeforeRetry("Failed to open control stream", err)
+					continue
 				}
+
+				myNonce, err := generateNonce()
+				if err != nil {
+					conn.CloseWithError(0, "failed to generate nonce")
+					waitBeforeRetry("Failed to generate nonce", err)
+					continue
+				}
+
+				// 📨 Send Hello
+				err = control.SendHello(stream, myNonce)
+				if err != nil {
+					conn.CloseWithError(0, "failed to send hello")
+					waitBeforeRetry("Failed to send hello", err)
+					continue
+				}
+
+				storePeerNonce(peer.Fingerprint, myNonce)
+
+				logger.Infof("Sent TieBreakerNonce: %d", myNonce)
+
+				registry.Add(peer.Fingerprint, conn, myNonce)
+
+				// 📢 Announce all exported routes
+				for netName, netCfg := range netcfg {
+					if !netCfg.Export {
+						continue
+					}
+					err = control.SendRouteAnnounce(stream, netName, []string{netCfg.Prefix})
+					if err != nil {
+						logger.Warnf("Failed to announce route for network %s: %v", netName, err)
+					}
+				}
+
+				// 🫡 Start Keepalive loop
+				control.StartKeepaliveLoop(stream)
+
+				// 🚀 Start Control Loop
+				go HandleControlStream(conn, stream, peer.Fingerprint)
+
+				reconnectBackoff = initialReconnectBackoff
+
+				<-conn.Context().Done()
+				logger.Warnf("Connection to %s closed: %v", peer.Address, conn.Context().Err())
+				logger.Infof("Reconnecting to %s in %s", peer.Address, reconnectBackoff)
+				time.Sleep(reconnectBackoff)
 			}
-
-			// 🫡 Start Keepalive loop
-			control.StartKeepaliveLoop(stream)
-
-			// 🚀 Start Control Loop
-			go HandleControlStream(conn, stream, peer.Fingerprint)
 		}()
 	}
 }

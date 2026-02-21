@@ -417,7 +417,7 @@ Status key:
 | Multi-network local interface creation | Complete | Multiple network devices are created and tracked by name. |
 | Raw packet framing consistency | Complete | Outbound and inbound use same network-aware binary frame. |
 | Data-plane routing correctness basics | Partial | First-match CIDR lookup only; no longest-prefix preference or policy checks. |
-| Peer dial lifecycle | Partial | One goroutine per peer with one-shot dial; no automatic reconnect/backoff. |
+| Peer dial lifecycle | Partial | Includes reconnect loop with bounded backoff, but lacks jitter, richer failure classification, and lifecycle controls. |
 | Duplicate connection tie-break | Partial | Nonce tie-break exists, but lifecycle races still possible under churn. |
 | Control command surface (`status/routes/peers/reload/goodbye`) | Complete | CLI and UDS handlers are wired end-to-end. |
 | Reload semantics | Partial | Re-announces routes but does not reconfigure interfaces, peer set, or listeners. |
@@ -425,7 +425,7 @@ Status key:
 | Access control on route announcements | Missing | No enforcement that peer may only announce allowed networks/prefixes. |
 | Security (TOFU + cert validity windows) | Partial | Fingerprint pinning + validity checks exist; trust still keyed only by peer name. |
 | Tests | Partial | Only `config/address` tests currently exist; most subsystems untested. |
-| CI pipeline | Missing | No repository CI workflow currently present. |
+| CI pipeline | Complete | Basic GitHub Actions workflow exists at `.github/workflows/ci.yml` for test/vet/build. |
 | Observability metrics breadth | Partial | Prometheus endpoint exists, but no custom counters/gauges emitted yet. |
 
 ## 15) High-Priority Remaining Work
@@ -440,8 +440,8 @@ Status key:
    - Longest-prefix match and deterministic best-route selection.
 5. **Test coverage expansion**
    - Add unit tests for control, registry, route table, forwarding framing, and TOFU behavior.
-6. **CI workflow**
-   - Gate PRs on `go test ./...`, `go vet ./...`, and daemon/cli build.
+6. **CI depth expansion**
+   - Add matrix/coverage/race checks beyond the current baseline workflow.
 
 ## 16) Notes on Documentation Accuracy
 

@@ -49,6 +49,23 @@ Main binaries:
 - Supports `status|routes|peers|reload|goodbye`.
 - Optional `--json` pretty-prints raw output.
 
+#### Onboarding commands (`init|invite|join|add-peer|doctor`)
+
+`vpnctl` also includes local onboarding helpers that operate on config/cert files:
+
+- `init`: generates a new self-signed cert/key pair, computes cert SHA-256 fingerprint, and writes a fresh config with one network and no peers.
+- `invite`: loads an existing config, requires an exported `--network`, and emits JSON (`version`, `network`, `prefix`, `inviter{name,address,fingerprint}`).
+- `join`: accepts exactly one of `--invite` or `--invite-file`, validates invite fields/CIDR, generates local identity, and writes a new config with the inviter pre-added as a peer.
+- `add-peer`: appends one peer entry (`name`, `address`, `fingerprint`, `networks`) to an existing config with basic validation.
+- `doctor`: runs local consistency checks across config parse, identity, CIDR/address formatting, fingerprint format, and peer network references.
+
+Current limitations:
+
+- These commands only read/write local files; they do not push updates into a running daemon process.
+- Invite payloads are plain JSON and are not signed, encrypted, or expiry-bound.
+- `join` writes a full target config and requires `--force` to overwrite existing config/cert/key files.
+- `add-peer` validates host:port, network references, optional fingerprint format, and duplicate peer names, but does not validate remote reachability.
+
 ## 3) Configuration Model (`config/`)
 
 ### Schema (`config.Config`)
@@ -400,7 +417,7 @@ Status key:
 | Multi-network local interface creation | Complete | Multiple network devices are created and tracked by name. |
 | Raw packet framing consistency | Complete | Outbound and inbound use same network-aware binary frame. |
 | Data-plane routing correctness basics | Partial | First-match CIDR lookup only; no longest-prefix preference or policy checks. |
-| Peer dial lifecycle | Partial | One goroutine per peer with one-shot dial; no automatic reconnect/backoff. |
+| Peer dial lifecycle | Partial | Includes reconnect loop with bounded backoff, but lacks jitter, richer failure classification, and lifecycle controls. |
 | Duplicate connection tie-break | Partial | Nonce tie-break exists, but lifecycle races still possible under churn. |
 | Control command surface (`status/routes/peers/reload/goodbye`) | Complete | CLI and UDS handlers are wired end-to-end. |
 | Reload semantics | Partial | Re-announces routes but does not reconfigure interfaces, peer set, or listeners. |
@@ -408,7 +425,7 @@ Status key:
 | Access control on route announcements | Missing | No enforcement that peer may only announce allowed networks/prefixes. |
 | Security (TOFU + cert validity windows) | Partial | Fingerprint pinning + validity checks exist; trust still keyed only by peer name. |
 | Tests | Partial | Only `config/address` tests currently exist; most subsystems untested. |
-| CI pipeline | Missing | No repository CI workflow currently present. |
+| CI pipeline | Complete | Basic GitHub Actions workflow exists at `.github/workflows/ci.yml` for test/vet/build. |
 | Observability metrics breadth | Partial | Prometheus endpoint exists, but no custom counters/gauges emitted yet. |
 
 ## 15) High-Priority Remaining Work
@@ -423,8 +440,8 @@ Status key:
    - Longest-prefix match and deterministic best-route selection.
 5. **Test coverage expansion**
    - Add unit tests for control, registry, route table, forwarding framing, and TOFU behavior.
-6. **CI workflow**
-   - Gate PRs on `go test ./...`, `go vet ./...`, and daemon/cli build.
+6. **CI depth expansion**
+   - Add matrix/coverage/race checks beyond the current baseline workflow.
 
 ## 16) Notes on Documentation Accuracy
 

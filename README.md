@@ -47,6 +47,28 @@ go test ./path/to/package -run TestName
 ./vpn -config /etc/vibepn/config.toml
 ```
 
+## Run as a systemd service
+
+```bash
+# Build and install the daemon binary.
+go build -o vpn ./cmd/vpn
+sudo install -m 0755 vpn /usr/local/bin/vpn
+
+# Install config and unit file.
+sudo install -d -m 0755 /etc/vibepn
+sudo install -m 0644 example/config.toml /etc/vibepn/config.toml
+sudo install -m 0644 example/systemd/vibepn.service /etc/systemd/system/vibepn.service
+
+# Create dedicated service account (if needed).
+sudo getent group vibepn >/dev/null || sudo groupadd --system vibepn
+sudo id -u vibepn >/dev/null 2>&1 || sudo useradd --system --gid vibepn --home /var/lib/vibepn --shell /usr/sbin/nologin vibepn
+
+# Reload units and start on boot.
+sudo systemctl daemon-reload
+sudo systemctl enable vibepn
+sudo systemctl start vibepn
+```
+
 Control CLI (via Unix socket `/var/run/vibepn.sock`):
 
 ```bash
@@ -55,6 +77,34 @@ Control CLI (via Unix socket `/var/run/vibepn.sock`):
 ./vpnctl routes
 ./vpnctl reload
 ./vpnctl goodbye
+```
+
+Onboarding helpers:
+
+```bash
+./vpnctl init -config /etc/vibepn/config.toml
+./vpnctl invite -config /etc/vibepn/config.toml -network corp -address 198.51.100.20:51820
+./vpnctl join -config /etc/vibepn/config.toml -invite-file invite.json
+./vpnctl add-peer -config /etc/vibepn/config.toml -name node3 -address 203.0.113.9:51820 -fingerprint <sha256> -networks corp
+./vpnctl doctor -config /etc/vibepn/config.toml
+```
+
+## Quick setup (2 peers)
+
+```bash
+# Peer 1 (reachable at 198.51.100.20:51820)
+./vpnctl init -config /etc/vibepn/config.toml -name peer1 -network corp -prefix 10.42.0.0/24 -address auto
+./vpnctl invite -config /etc/vibepn/config.toml -network corp -address 198.51.100.20:51820 -name peer1 -out /tmp/peer1-invite.json
+
+# Copy /tmp/peer1-invite.json to peer 2 manually.
+# Peer 2 (reachable at 203.0.113.9:51820)
+./vpnctl join -config /etc/vibepn/config.toml -name peer2 -invite-file /tmp/peer1-invite.json -address auto
+
+# Back on peer 1, use the fingerprint printed by peer 2's join command output.
+./vpnctl add-peer -config /etc/vibepn/config.toml -name peer2 -address 203.0.113.9:51820 -fingerprint <peer2_fingerprint> -networks corp
+
+# Run on each peer.
+./vpnctl doctor -config /etc/vibepn/config.toml
 ```
 
 ## Architecture (High Level)
@@ -82,6 +132,6 @@ For full implementation detail and subsystem-by-subsystem completeness status, s
 ## Known Gaps
 
 - Test coverage is still very limited (currently only `config/address` tests).
-- Peer reconnect/backoff strategy is not implemented.
+- Peer reconnect exists but remains basic and lacks richer failure classification/backoff tuning.
 - `reload` revalidates/re-announces routes but does not reinitialize interfaces, peers, or listeners.
-- CI workflow is not yet configured.
+- Route-policy enforcement for peer announcements is not yet implemented.

@@ -57,6 +57,34 @@ Control CLI (via Unix socket `/var/run/vibepn.sock`):
 ./vpnctl goodbye
 ```
 
+Onboarding helpers:
+
+```bash
+./vpnctl init -config /etc/vibepn/config.toml
+./vpnctl invite -config /etc/vibepn/config.toml -network corp -address 198.51.100.20:51820
+./vpnctl join -config /etc/vibepn/config.toml -invite-file invite.json
+./vpnctl add-peer -config /etc/vibepn/config.toml -name node3 -address 203.0.113.9:51820 -fingerprint <sha256> -networks corp
+./vpnctl doctor -config /etc/vibepn/config.toml
+```
+
+## Quick setup (2 peers)
+
+```bash
+# Peer 1 (reachable at 198.51.100.20:51820)
+./vpnctl init -config /etc/vibepn/config.toml -name peer1 -network corp -prefix 10.42.0.0/24 -address auto
+./vpnctl invite -config /etc/vibepn/config.toml -network corp -address 198.51.100.20:51820 -name peer1 -out /tmp/peer1-invite.json
+
+# Copy /tmp/peer1-invite.json to peer 2 manually.
+# Peer 2 (reachable at 203.0.113.9:51820)
+./vpnctl join -config /etc/vibepn/config.toml -name peer2 -invite-file /tmp/peer1-invite.json -address auto
+
+# Back on peer 1, use the fingerprint printed by peer 2's join command output.
+./vpnctl add-peer -config /etc/vibepn/config.toml -name peer2 -address 203.0.113.9:51820 -fingerprint <peer2_fingerprint> -networks corp
+
+# Run on each peer.
+./vpnctl doctor -config /etc/vibepn/config.toml
+```
+
 ## Architecture (High Level)
 
 - `cmd/vpn`: daemon wiring (config, interfaces, QUIC listener, control server, route table, peer registry)

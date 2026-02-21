@@ -49,6 +49,23 @@ Main binaries:
 - Supports `status|routes|peers|reload|goodbye`.
 - Optional `--json` pretty-prints raw output.
 
+#### Onboarding commands (`init|invite|join|add-peer|doctor`)
+
+`vpnctl` also includes local onboarding helpers that operate on config/cert files:
+
+- `init`: generates a new self-signed cert/key pair, computes cert SHA-256 fingerprint, and writes a fresh config with one network and no peers.
+- `invite`: loads an existing config, requires an exported `--network`, and emits JSON (`version`, `network`, `prefix`, `inviter{name,address,fingerprint}`).
+- `join`: accepts exactly one of `--invite` or `--invite-file`, validates invite fields/CIDR, generates local identity, and writes a new config with the inviter pre-added as a peer.
+- `add-peer`: appends one peer entry (`name`, `address`, `fingerprint`, `networks`) to an existing config with basic validation.
+- `doctor`: runs local consistency checks across config parse, identity, CIDR/address formatting, fingerprint format, and peer network references.
+
+Current limitations:
+
+- These commands only read/write local files; they do not push updates into a running daemon process.
+- Invite payloads are plain JSON and are not signed, encrypted, or expiry-bound.
+- `join` writes a full target config and requires `--force` to overwrite existing config/cert/key files.
+- `add-peer` validates host:port, network references, optional fingerprint format, and duplicate peer names, but does not validate remote reachability.
+
 ## 3) Configuration Model (`config/`)
 
 ### Schema (`config.Config`)

@@ -10,6 +10,15 @@ Group=vibepn
 ExecStart=/usr/local/bin/vpn -config /etc/vibepn/config.toml
 Restart=always
 RestartSec=2
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vibepn /run/vibepn
+RuntimeDirectory=vibepn
+# The control socket lives under /run/vibepn
+Environment=VIBEPN_LOG_LEVEL=info
 
 [Install]
 WantedBy=multi-user.target

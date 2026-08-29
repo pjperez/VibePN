@@ -186,7 +186,7 @@ func TestRunDoctorInvalidAndValidConfigs(t *testing.T) {
 		},
 	}
 	validConfigPath := filepath.Join(dir, "valid.toml")
-	if err := writeConfig(validConfigPath, validCfg); err != nil {
+	if err := config.Write(validConfigPath, validCfg); err != nil {
 		t.Fatalf("write valid config: %v", err)
 	}
 

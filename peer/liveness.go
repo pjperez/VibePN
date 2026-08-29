@@ -9,80 +9,84 @@ import (
 	"vibepn/shared"
 )
 
+// LivenessTracker tracks the last-seen time of peers.
 type LivenessTracker struct {
 	mu      sync.Mutex
-	peers   map[string]shared.PeerState // ✅ Always shared.PeerState
+	peers   map[string]shared.PeerState
 	timeout time.Duration
 }
 
+// NewLivenessTracker creates a tracker with the given timeout.
 func NewLivenessTracker(timeout time.Duration) *LivenessTracker {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-
 	return &LivenessTracker{
-		peers:   make(map[string]shared.PeerState), // ✅ Always shared.PeerState
+		peers:   make(map[string]shared.PeerState),
 		timeout: timeout,
 	}
 }
 
+// MarkAlive records that a peer was seen now.
 func (t *LivenessTracker) MarkAlive(id string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
-	t.peers[id] = shared.PeerState{
-		ID:       id,
-		LastSeen: time.Now(),
-	}
+	t.peers[id] = shared.PeerState{ID: id, LastSeen: time.Now()}
 }
 
+// UpdatePeer records that a peer was seen now.
 func (t *LivenessTracker) UpdatePeer(peerID string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.peers[peerID] = shared.PeerState{
-		ID:       peerID,
-		LastSeen: time.Now(),
-	}
+	t.MarkAlive(peerID)
 }
 
+// ListPeers returns a snapshot of tracked peers.
 func (t *LivenessTracker) ListPeers() []shared.PeerState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	var out []shared.PeerState
+	out := make([]shared.PeerState, 0, len(t.peers))
 	for _, p := range t.peers {
 		out = append(out, p)
 	}
 	return out
 }
 
+// StartWatcher periodically removes peers that have not been seen within the
+// timeout and drops their routes. The sweep interval scales with the timeout
+// so small timeouts (tests) are observed promptly.
 func (t *LivenessTracker) StartWatcher(rt *netgraph.RouteTable) {
 	logger := log.New("peer/watcher")
 
+	interval := 10 * time.Second
+	if t.timeout < interval {
+		interval = t.timeout / 3
+	}
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
-		for {
-			<-ticker.C
-
+		for range ticker.C {
 			t.mu.Lock()
 			now := time.Now()
-			expired := []string{}
-
+			var expired []string
 			for id, peer := range t.peers {
 				if now.Sub(peer.LastSeen) > t.timeout {
 					expired = append(expired, id)
 				}
 			}
+			for _, id := range expired {
+				delete(t.peers, id)
+			}
+			t.mu.Unlock()
 
 			for _, id := range expired {
 				logger.Warnf("Peer %s considered dead (timeout)", id)
-				delete(t.peers, id)
 				rt.RemoveByPeer(id)
 			}
-			t.mu.Unlock()
 		}
 	}()
 }

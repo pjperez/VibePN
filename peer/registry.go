@@ -4,79 +4,49 @@ import (
 	"context"
 	"sync"
 	"time"
+	"vibepn/netgraph"
 
 	"vibepn/config"
 	"vibepn/control"
 	"vibepn/log"
+	"vibepn/protocol"
+	"vibepn/shared"
 
-	gquic "github.com/quic-go/quic-go" // alias to avoid conflict
+	gquic "github.com/quic-go/quic-go"
 )
 
+// Registry tracks active peer connections.
 type Registry struct {
 	mu           sync.RWMutex
 	conns        map[string]gquic.Connection // peerID → connection
 	logger       *log.Logger
 	identity     config.Identity
-	netcfg       map[string]config.NetworkConfig
-	onConnect    func(peerID string, conn gquic.Connection) // 🧠 callback on new connection
-	onDisconnect func(peerID string)                        // 🧠 NEW: callback on full disconnect
+	onConnect    func(peerID string, conn gquic.Connection)
+	onDisconnect func(peerID string)
 }
 
-var peerNonces struct {
-	sync.Mutex
-	m map[string]uint64
-}
-
-func init() {
-	peerNonces.m = make(map[string]uint64)
-}
-
-func storePeerNonce(peerID string, nonce uint64) {
-	peerNonces.Lock()
-	defer peerNonces.Unlock()
-	peerNonces.m[peerID] = nonce
-}
-
-func getPeerNonce(peerID string) (uint64, bool) {
-	peerNonces.Lock()
-	defer peerNonces.Unlock()
-	nonce, ok := peerNonces.m[peerID]
-	return nonce, ok
-}
-
-func NewRegistry(identity config.Identity, netcfg map[string]config.NetworkConfig) *Registry {
+func NewRegistry(identity config.Identity) *Registry {
 	return &Registry{
 		conns:    make(map[string]gquic.Connection),
 		logger:   log.New("peer/registry"),
 		identity: identity,
-		netcfg:   netcfg,
 	}
 }
 
-func (r *Registry) Add(peerID string, conn gquic.Connection, myNonce uint64) {
+// Add registers a connection for peerID. If a connection already exists, the
+// caller must have already resolved the tie-break; this method simply replaces
+// the old connection.
+func (r *Registry) Add(peerID string, conn gquic.Connection) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	existing := r.conns[peerID]
-	if existing != nil {
-		peerNonce, ok := getPeerNonce(peerID)
-		if !ok {
-			r.logger.Warnf("No peer nonce yet for %s, keeping existing connection", peerID)
-			conn.CloseWithError(0, "duplicate connection (no peer nonce)")
-			return
-		}
+	r.conns[peerID] = conn
+	r.mu.Unlock()
 
-		if myNonce < peerNonce {
-			r.logger.Warnf("Duplicate connection for peer %s, keeping outgoing (I win tie-break)", peerID)
-			existing.CloseWithError(0, "duplicate connection (loser)")
-		} else {
-			r.logger.Warnf("Duplicate connection for peer %s, keeping incoming (peer wins tie-break)", peerID)
-			conn.CloseWithError(0, "duplicate connection (loser)")
-			return
-		}
+	if existing != nil && existing != conn {
+		r.logger.Infof("Replacing connection for peer %s", peerID)
+		_ = existing.CloseWithError(0, "superseded by new connection")
 	}
 
-	r.conns[peerID] = conn
 	r.logger.Infof("Registered connection for peer %s", peerID)
 
 	if r.onConnect != nil {
@@ -90,34 +60,28 @@ func (r *Registry) Add(peerID string, conn gquic.Connection, myNonce uint64) {
 	}()
 }
 
-// 🧠 Internal: remove a connection safely
+// removeConnection removes a connection only if it is still the active one.
 func (r *Registry) removeConnection(peerID string, closedConn gquic.Connection) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	existing := r.conns[peerID]
 	if existing == closedConn {
-		r.logger.Infof("Removing connection for peer %s", peerID)
 		delete(r.conns, peerID)
+	}
+	r.mu.Unlock()
 
-		// 🧠 Only if no connection left, trigger onDisconnect
-		if r.onDisconnect != nil {
-			r.onDisconnect(peerID)
-		}
-	} else {
-		r.logger.Infof("Closed connection was not active for peer %s, keeping current connection", peerID)
+	if existing == closedConn && r.onDisconnect != nil {
+		r.onDisconnect(peerID)
 	}
 }
 
-// 🔥 NO DIRECT CALL TO Remove() ANYMORE EXTERNALLY
-// 🔥 use removeConnection inside connection watcher
-
+// Get returns the active connection for peerID, if any.
 func (r *Registry) Get(peerID string) gquic.Connection {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.conns[peerID]
 }
 
+// All returns a snapshot of all active connections.
 func (r *Registry) All() map[string]gquic.Connection {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -129,44 +93,86 @@ func (r *Registry) All() map[string]gquic.Connection {
 	return out
 }
 
+// ListPeers returns the IDs of all active connections as peer states.
+func (r *Registry) ListPeers() []shared.PeerState {
+	conns := r.All()
+	out := make([]shared.PeerState, 0, len(conns))
+	for id := range conns {
+		out = append(out, shared.PeerState{ID: id, LastSeen: time.Now()})
+	}
+	return out
+}
+
+// UpdatePeer is a no-op for the registry (liveness is tracked separately).
+func (r *Registry) UpdatePeer(peerID string) {}
+
+// SendRoute sends a route announcement to a peer over a fresh stream.
+func (r *Registry) SendRoute(peerID, network string, route netgraph.Route) error {
+	conn := r.Get(peerID)
+	if conn == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	stream, err := conn.OpenStreamSync(ctx)
+	cancel()
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+
+	return protocol.WriteMessage(stream, protocol.RouteAnnounce{
+		Network:  network,
+		Prefixes: []string{route.Prefix},
+		Metric:   uint16(route.Metric),
+	})
+}
+
+// DisconnectAll sends a goodbye to every peer and closes the connections.
 func (r *Registry) DisconnectAll() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	for peerID, conn := range r.conns {
-		// 🔥 Try to say Goodbye before closing
+	conns := r.conns
+	r.conns = make(map[string]gquic.Connection)
+	r.mu.Unlock()
+
+	for peerID, conn := range conns {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		stream, err := conn.OpenStreamSync(ctx)
 		cancel()
 		if err == nil {
-			_ = control.SendGoodbye(stream)
+			_ = protocol.WriteMessage(stream, protocol.Goodbye{})
 			_ = stream.Close()
 		} else {
 			r.logger.Warnf("Failed to open stream to peer %s for goodbye: %v", peerID, err)
 		}
-
 		_ = conn.CloseWithError(0, "shutdown")
 		r.logger.Infof("Disconnected from peer %s", peerID)
 	}
-	r.conns = map[string]gquic.Connection{}
 }
 
+// Identity returns the local identity.
 func (r *Registry) Identity() config.Identity {
 	return r.identity
 }
 
-func (r *Registry) NetConfig() map[string]config.NetworkConfig {
-	return r.netcfg
-}
-
+// SetOnConnect registers a callback invoked when a connection is registered.
 func (r *Registry) SetOnConnect(cb func(peerID string, conn gquic.Connection)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onConnect = cb
 }
 
-// 🧠 NEW: set callback when peer fully disconnected
+// SetOnDisconnect registers a callback invoked when the last connection to a
+// peer is removed.
 func (r *Registry) SetOnDisconnect(cb func(peerID string)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onDisconnect = cb
 }
+
+// ReconcilePeers is a no-op hook for the control server; the connection
+// manager owns dialing.
+func (r *Registry) ReconcilePeers(cfg *config.Config) error {
+	return nil
+}
+
+var _ control.PeerManager = (*Registry)(nil)

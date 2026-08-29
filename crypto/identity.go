@@ -1,4 +1,4 @@
-// Package crypto: identity and certificate management
+// Package crypto: identity and certificate management.
 package crypto
 
 import (
@@ -9,6 +9,14 @@ import (
 	"fmt"
 )
 
+// Fingerprint returns the SHA-256 fingerprint of a DER certificate.
+func Fingerprint(certDER []byte) string {
+	sum := sha256.Sum256(certDER)
+	return hex.EncodeToString(sum[:])
+}
+
+// LoadTLS loads the local cert/key pair, verifies the optional expected
+// fingerprint, and returns a server-side TLS config.
 func LoadTLS(certPath, keyPath, expectedFP string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
@@ -20,15 +28,14 @@ func LoadTLS(certPath, keyPath, expectedFP string) (*tls.Config, error) {
 		return nil, fmt.Errorf("parse cert: %w", err)
 	}
 
-	hash := sha256.Sum256(x509cert.Raw)
-	fingerprint := hex.EncodeToString(hash[:])
+	fingerprint := Fingerprint(x509cert.Raw)
 	if expectedFP != "" && fingerprint != expectedFP {
 		return nil, fmt.Errorf("fingerprint mismatch: got %s, expected %s", fingerprint, expectedFP)
 	}
 
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"vibepn/0.1"},
+		NextProtos:   []string{ALPNProtocol},
 	}
 	return tlsConf, nil
 }

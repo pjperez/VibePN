@@ -5,313 +5,272 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"io"
+	"math"
+	"sync"
 	"time"
 
 	"vibepn/config"
-	"vibepn/control"
 	"vibepn/crypto"
 	"vibepn/log"
-	"vibepn/netgraph"
+	"vibepn/protocol"
 
 	"github.com/quic-go/quic-go"
 )
 
+const (
+	dialTimeout        = 5 * time.Second
+	streamOpenTimeout  = 5 * time.Second
+	initialBackoff     = 2 * time.Second
+	maxBackoff         = 30 * time.Second
+	backoffJitterRatio = 0.3
+)
+
 func generateNonce() (uint64, error) {
 	var b [8]byte
-	_, err := rand.Read(b[:])
-	if err != nil {
+	if _, err := rand.Read(b[:]); err != nil {
 		return 0, fmt.Errorf("failed to generate random nonce: %w", err)
 	}
 	return binary.BigEndian.Uint64(b[:]), nil
 }
 
-func ConnectToPeers(
-	peers []config.Peer,
-	identity config.Identity,
-	routeTable *netgraph.RouteTable,
-	netcfg map[string]config.NetworkConfig,
+// ConnectionManager dials configured peers and maintains one connection per
+// peer with exponential backoff and jitter.
+type ConnectionManager struct {
+	logger   *log.Logger
+	registry *Registry
+	tofu     *crypto.TOFUStore
+	identity config.Identity
+	netcfg   func() map[string]config.NetworkConfig
+
+	mu          sync.Mutex
+	peerConfigs map[string]config.Peer // name → config (peers with active dial loops)
+
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
+}
+
+// NewConnectionManager builds a connection manager.
+func NewConnectionManager(
 	registry *Registry,
-) {
-	logger := log.New("peer/manager")
-	const (
-		initialReconnectBackoff = 2 * time.Second
-		maxReconnectBackoff     = 30 * time.Second
-	)
+	tofu *crypto.TOFUStore,
+	identity config.Identity,
+	netcfg func() map[string]config.NetworkConfig,
+) *ConnectionManager {
+	return &ConnectionManager{
+		logger:      log.New("peer/manager"),
+		registry:    registry,
+		tofu:        tofu,
+		identity:    identity,
+		netcfg:      netcfg,
+		peerConfigs: make(map[string]config.Peer),
+		stop:        make(chan struct{}),
+	}
+}
 
-	logger.Infof("identity.Fingerprint = %q", identity.Fingerprint)
-	logger.Infof("netcfg contents: %+v", netcfg)
-
+// Start launches a dial loop per configured peer.
+func (m *ConnectionManager) Start(peers []config.Peer) {
 	for _, p := range peers {
-		peer := p
-		logger.Infof("Launching goroutine to connect to peer: %s", peer.Name)
-
-		go func() {
-			logger.Infof("Started goroutine for peer %s (%s)", peer.Name, peer.Address)
-
-			tlsConf, err := crypto.LoadPeerTLSWithTOFU(peer.Name, peer.Address, identity.Cert, identity.Key)
-			if err != nil {
-				logger.Errorf("Failed to create TLS config for %s: %v", peer.Name, err)
-				return
-			}
-			logger.Infof("TLS config created for peer %s", peer.Name)
-
-			reconnectBackoff := initialReconnectBackoff
-			waitBeforeRetry := func(reason string, err error) {
-				logger.Warnf("%s: %v (retrying in %s)", reason, err, reconnectBackoff)
-				time.Sleep(reconnectBackoff)
-				reconnectBackoff *= 2
-				if reconnectBackoff > maxReconnectBackoff {
-					reconnectBackoff = maxReconnectBackoff
-				}
-			}
-
-			for {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
-				logger.Infof("Dialing QUIC to %s...", peer.Address)
-				conn, err := quic.DialAddr(ctx, peer.Address, tlsConf, nil)
-				cancel()
-				if err != nil {
-					waitBeforeRetry(fmt.Sprintf("❌ QUIC dial to %s failed", peer.Address), err)
-					continue
-				}
-				logger.Infof("✅ QUIC connection established to %s", peer.Address)
-
-				streamCtx, streamCancel := context.WithTimeout(context.Background(), 2*time.Second)
-				stream, err := conn.OpenStreamSync(streamCtx)
-				streamCancel()
-				if err != nil {
-					conn.CloseWithError(0, "failed to open control stream")
-					waitBeforeRetry("Failed to open control stream", err)
-					continue
-				}
-
-				myNonce, err := generateNonce()
-				if err != nil {
-					conn.CloseWithError(0, "failed to generate nonce")
-					waitBeforeRetry("Failed to generate nonce", err)
-					continue
-				}
-
-				// 📨 Send Hello
-				err = control.SendHello(stream, myNonce)
-				if err != nil {
-					conn.CloseWithError(0, "failed to send hello")
-					waitBeforeRetry("Failed to send hello", err)
-					continue
-				}
-
-				storePeerNonce(peer.Fingerprint, myNonce)
-
-				logger.Infof("Sent TieBreakerNonce: %d", myNonce)
-
-				registry.Add(peer.Fingerprint, conn, myNonce)
-
-				// 📢 Announce all exported routes
-				for netName, netCfg := range netcfg {
-					if !netCfg.Export {
-						continue
-					}
-					err = control.SendRouteAnnounce(stream, netName, []string{netCfg.Prefix})
-					if err != nil {
-						logger.Warnf("Failed to announce route for network %s: %v", netName, err)
-					}
-				}
-
-				// 🫡 Start Keepalive loop
-				control.StartKeepaliveLoop(stream)
-
-				// 🚀 Start Control Loop
-				go HandleControlStream(conn, stream, peer.Fingerprint)
-
-				reconnectBackoff = initialReconnectBackoff
-
-				<-conn.Context().Done()
-				logger.Warnf("Connection to %s closed: %v", peer.Address, conn.Context().Err())
-				logger.Infof("Reconnecting to %s in %s", peer.Address, reconnectBackoff)
-				time.Sleep(reconnectBackoff)
-			}
-		}()
+		m.startDialLoop(p)
 	}
 }
 
-func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string) {
-	logger := log.New("peer/control")
+// startDialLoop launches a dial loop for a peer unless one already exists.
+func (m *ConnectionManager) startDialLoop(peer config.Peer) {
+	m.mu.Lock()
+	if _, exists := m.peerConfigs[peer.Name]; exists {
+		m.mu.Unlock()
+		return
+	}
+	m.peerConfigs[peer.Name] = peer
+	m.mu.Unlock()
 
+	m.wg.Add(1)
+	go m.dialLoop(peer)
+}
+
+// ReconcilePeers starts dial loops for any configured peers that are not
+// already being dialed. It returns an error only if the config is invalid.
+func (m *ConnectionManager) ReconcilePeers(cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("nil config")
+	}
+	for _, p := range cfg.Peers {
+		m.startDialLoop(p)
+	}
+	return nil
+}
+
+// Stop terminates all dial loops and waits for them to finish.
+func (m *ConnectionManager) Stop() {
+	m.stopOnce.Do(func() { close(m.stop) })
+	m.wg.Wait()
+}
+
+func (m *ConnectionManager) dialLoop(peer config.Peer) {
+	defer m.wg.Done()
+	m.logger.Infof("Dial loop for %s started", peer.Name)
+
+	backoff := initialBackoff
 	for {
-		lenBuf := make([]byte, 2)
-		_, err := io.ReadFull(stream, lenBuf)
+		select {
+		case <-m.stop:
+			m.logger.Infof("Dial loop for %s stopped", peer.Name)
+			return
+		default:
+		}
+
+		// Skip dialing if we already have a live connection.
+		if m.registry.Get(peer.Name) != nil {
+			select {
+			case <-m.stop:
+				m.logger.Infof("Dial loop for %s stopped", peer.Name)
+				return
+			case <-time.After(5 * time.Second):
+			}
+			continue
+		}
+
+		conn, err := m.dialOnce(peer)
 		if err != nil {
-			logger.Warnf("Control stream closed: %v", err)
-			conn.CloseWithError(0, "control stream closed")
-			return
-		}
-
-		length := binary.BigEndian.Uint16(lenBuf)
-		if length == 0 || length > 4096 {
-			logger.Warnf("Invalid control message length: %d", length)
-			conn.CloseWithError(0, "invalid control message length")
-			return
-		}
-
-		msgBuf := make([]byte, length)
-		_, err = io.ReadFull(stream, msgBuf)
-		if err != nil {
-			logger.Warnf("Failed to read full control message: %v", err)
-			conn.CloseWithError(0, "invalid control payload")
-			return
-		}
-
-		controlType := msgBuf[0]
-		body := msgBuf[1:]
-
-		switch controlType {
-		case 'H':
-			logger.Infof("Received Hello from %s", conn.RemoteAddr())
-
-			// 🧠 Read 8 bytes for TieBreakerNonce from the body
-			if len(body) < 8 {
-				logger.Warnf("Hello payload too short")
+			wait := jittered(backoff)
+			m.logger.Warnf("Dial %s (%s) failed: %v (retrying in %s)", peer.Name, peer.Address, err, wait)
+			if !sleepCtx(m.stop, wait) {
+				m.logger.Infof("Dial loop for %s stopped", peer.Name)
 				return
 			}
-			tieBreakerNonce := binary.BigEndian.Uint64(body[:8])
-			logger.Infof("Received TieBreakerNonce: %d", tieBreakerNonce)
+			backoff = nextBackoff(backoff)
+			continue
+		}
 
-			storePeerNonce(peerID, tieBreakerNonce)
+		m.logger.Infof("Connection established to %s (%s)", peer.Name, peer.Address)
+		backoff = initialBackoff
+		m.runSession(peer, conn)
+	}
+}
 
-			// 🧠 Announce exported routes
-			for netName, netCfg := range control.GetNetConfig() {
-				if !netCfg.Export {
-					continue
-				}
-				err := control.SendRouteAnnounce(stream, netName, []string{netCfg.Prefix})
-				if err != nil {
-					logger.Warnf("Failed to announce route for network %s: %v", netName, err)
-				}
-			}
+func (m *ConnectionManager) dialOnce(peer config.Peer) (quic.Connection, error) {
+	tlsConf, err := m.tofu.ClientTLS(m.identity.Cert, m.identity.Key)
+	if err != nil {
+		return nil, fmt.Errorf("build TLS config: %w", err)
+	}
 
-			control.StartKeepaliveLoop(stream)
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	conn, err := quic.DialAddr(ctx, peer.Address, tlsConf, quicConfig())
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
 
-		case 'A':
-			logger.Infof("Received Route-Announce from %s", conn.RemoteAddr())
-			handleRouteAnnounce(body, peerID)
+// runSession drives a single connection: opens the control stream, performs
+// the hello exchange, announces routes, and blocks until the connection dies.
+func (m *ConnectionManager) runSession(peer config.Peer, conn quic.Connection) {
+	ctx, cancel := context.WithTimeout(context.Background(), streamOpenTimeout)
+	stream, err := conn.OpenStreamSync(ctx)
+	cancel()
+	if err != nil {
+		m.logger.Warnf("Failed to open control stream to %s: %v", peer.Name, err)
+		_ = conn.CloseWithError(0, "failed to open control stream")
+		return
+	}
 
-		case 'W':
-			logger.Infof("Received Route-Withdraw from %s", conn.RemoteAddr())
-			handleRouteWithdraw(body)
+	myNonce, err := generateNonce()
+	if err != nil {
+		_ = conn.CloseWithError(0, "failed to generate nonce")
+		return
+	}
 
-		case 'K':
-			logger.Debugf("Received Keepalive from %s", conn.RemoteAddr())
-			handleKeepalive(body, peerID)
+	if err := protocol.WriteMessage(stream, protocol.Hello{Nonce: myNonce}); err != nil {
+		m.logger.Warnf("Failed to send hello to %s: %v", peer.Name, err)
+		_ = conn.CloseWithError(0, "failed to send hello")
+		return
+	}
 
-		case 'G':
-			logger.Infof("Received Goodbye from %s", conn.RemoteAddr())
-			conn.CloseWithError(0, "peer sent goodbye")
-			return
+	// Register the connection; the registry resolves duplicate tie-breaks.
+	m.registry.Add(peer.Name, conn)
 
-		default:
-			logger.Warnf("Unknown control type: %q", controlType)
+	// Announce exported local routes.
+	m.announceRoutes(stream)
+
+	// Start the keepalive writer and the control reader.
+	stopKeepalive := StartKeepaliveLoop(stream)
+	defer stopKeepalive()
+
+	HandleControlStream(conn, stream, peer.Name)
+
+	// Block until the connection ends so the dial loop can reconnect.
+	<-conn.Context().Done()
+}
+
+func (m *ConnectionManager) announceRoutes(stream quic.Stream) {
+	for netName, netCfg := range m.netcfg() {
+		if !netCfg.Export {
+			continue
+		}
+		if err := protocol.WriteMessage(stream, protocol.RouteAnnounce{
+			Network:  netName,
+			Prefixes: []string{netCfg.Prefix},
+			Metric:   1,
+		}); err != nil {
+			m.logger.Warnf("Failed to announce route for network %s: %v", netName, err)
 		}
 	}
 }
 
-// 👇 Properly decode a Route-Announce message
-func handleRouteAnnounce(body []byte, peerID string) {
-	logger := log.New("peer/route-announce")
-
-	if len(body) < 2 {
-		logger.Warnf("Invalid route-announce body")
-		return
+// nextBackoff doubles the current backoff, capped at maxBackoff.
+func nextBackoff(current time.Duration) time.Duration {
+	next := current * 2
+	if next > maxBackoff {
+		next = maxBackoff
 	}
+	return next
+}
 
-	networkLen := int(body[0])
-	if len(body) < 1+networkLen {
-		logger.Warnf("Invalid route-announce network name length")
-		return
+// jittered applies ±30% jitter to a backoff, keeping it within
+// [initialBackoff, maxBackoff].
+func jittered(base time.Duration) time.Duration {
+	jitter := time.Duration(float64(base) * backoffJitterRatio)
+	delta := time.Duration(randInt64(int64(-jitter), int64(jitter)))
+	out := base + delta
+	if out < initialBackoff {
+		out = initialBackoff
 	}
+	if out > maxBackoff {
+		out = maxBackoff
+	}
+	return out
+}
 
-	networkName := string(body[1 : 1+networkLen])
-	logger.Infof("Route-Announce for network: %s", networkName)
+func randInt64(min, max int64) int64 {
+	if max <= min {
+		return min
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return min
+	}
+	n := int64(binary.BigEndian.Uint64(b[:]) & math.MaxInt64)
+	return min + n%(max-min+1)
+}
 
-	cursor := 1 + networkLen
-
-	for cursor < len(body) {
-		if cursor+5 > len(body) {
-			logger.Warnf("Invalid route-announce route length")
-			return
-		}
-
-		prefixLen := int(body[cursor])
-		prefixBytes := body[cursor+1 : cursor+1+prefixLen]
-		metric := binary.BigEndian.Uint16(body[cursor+1+prefixLen : cursor+1+prefixLen+2])
-
-		prefix := string(prefixBytes)
-		cursor += 1 + prefixLen + 2
-
-		route := netgraph.Route{
-			Network: networkName,
-			Prefix:  prefix,
-			PeerID:  peerID,
-			Metric:  int(metric),
-		}
-
-		logger.Infof("Learned route: %+v", route)
-		control.GetRouteTable().AddRoute(route)
+func sleepCtx(stop <-chan struct{}, d time.Duration) bool {
+	select {
+	case <-stop:
+		return false
+	case <-time.After(d):
+		return true
 	}
 }
 
-// 👇 Properly decode a Route-Withdraw message
-func handleRouteWithdraw(body []byte) {
-	logger := log.New("peer/route-withdraw")
-
-	if len(body) < 2 {
-		logger.Warnf("Invalid route-withdraw body")
-		return
+// quicConfig returns the shared QUIC configuration.
+func quicConfig() *quic.Config {
+	return &quic.Config{
+		EnableDatagrams:       false,
+		MaxIdleTimeout:        90 * time.Second,
+		KeepAlivePeriod:       15 * time.Second,
+		MaxIncomingStreams:    1024,
+		MaxIncomingUniStreams: -1,
 	}
-
-	networkLen := int(body[0])
-	if len(body) < 1+networkLen {
-		logger.Warnf("Invalid route-withdraw network name length")
-		return
-	}
-
-	networkName := string(body[1 : 1+networkLen])
-
-	cursor := 1 + networkLen
-
-	if cursor >= len(body) {
-		logger.Warnf("Missing prefix in route-withdraw")
-		return
-	}
-
-	prefixLen := int(body[cursor])
-	if cursor+1+prefixLen > len(body) {
-		logger.Warnf("Invalid prefix in route-withdraw")
-		return
-	}
-
-	prefix := string(body[cursor+1 : cursor+1+prefixLen])
-
-	logger.Infof("Withdraw route network=%s, prefix=%s", networkName, prefix)
-
-	control.GetRouteTable().RemoveRoute(networkName, prefix)
-}
-
-func handleKeepalive(body []byte, peerID string) {
-	logger := log.New("peer/keepalive")
-
-	if len(body) < 8 {
-		logger.Warnf("Invalid keepalive payload")
-		return
-	}
-
-	timestamp := binary.BigEndian.Uint64(body)
-	t := time.Unix(int64(timestamp), 0)
-
-	logger.Debugf("Keepalive received: timestamp = %s", t.Format(time.RFC3339))
-
-	// 🔥 Mark the peer as alive
-	control.GetPeerTracker().UpdatePeer(peerID)
-	logger.Debugf("Updated liveness for peer %s", peerID)
 }

@@ -1,140 +1,140 @@
 package control
 
 import (
-	"encoding/json"
-	"net/netip"
 	"time"
 
 	"vibepn/config"
 	"vibepn/log"
 	"vibepn/netgraph"
+	"vibepn/shared"
 )
 
-type CommandRequest struct {
-	Cmd string `json:"cmd"`
+// PeerLister lists currently-live peers.
+type PeerLister interface {
+	ListPeers() []shared.PeerState
+	UpdatePeer(peerID string)
 }
 
-type CommandResponse struct {
-	Status string      `json:"status"`
-	Output interface{} `json:"output,omitempty"`
-	Error  string      `json:"error,omitempty"`
+// PeerSender sends a route announcement to a peer.
+type PeerSender interface {
+	SendRoute(peerID, network string, route netgraph.Route) error
 }
 
-func Handle(cmd string, _ json.RawMessage, logger *log.Logger) CommandResponse {
-	switch cmd {
-	case "routes":
-		var output []map[string]interface{}
-		for _, r := range GetRouteTable().AllRoutes() {
-			output = append(output, map[string]interface{}{
-				"network": r.Network,
-				"prefix":  r.Prefix,
-				"peer":    r.PeerID,
-				"metric":  r.Metric,
-				"expires": r.ExpiresAt.Format(time.RFC3339),
-			})
-		}
-		return CommandResponse{Status: "ok", Output: output}
+// PeerManager is the interface the daemon exposes to the control server.
+type PeerManager interface {
+	PeerLister
+	PeerSender
+	DisconnectAll()
+	ReconcilePeers(cfg *config.Config) error
+}
 
-	case "peers":
-		var output []map[string]interface{}
-		for _, p := range GetPeerTracker().ListPeers() {
-			output = append(output, map[string]interface{}{
-				"id":        p.ID,
-				"last_seen": p.LastSeen.Format(time.RFC3339),
-			})
-		}
-		return CommandResponse{Status: "ok", Output: output}
+// ServerDeps wires the control server to daemon subsystems.
+type ServerDeps struct {
+	ConfigPath string
+	Routes     *netgraph.RouteTable
+	Peers      PeerManager
+	IdentityFP string
+	Logger     *log.Logger
+}
 
-	case "status":
-		resp := map[string]interface{}{
-			"uptime": Uptime(),
-			"peers":  len(GetPeerTracker().ListPeers()),
-			"routes": len(GetRouteTable().AllRoutes()),
-		}
-		return CommandResponse{Status: "ok", Output: resp}
+// Handler builds a command handler function for a UDS server.
+func Handler(deps ServerDeps) func(cmd string, logger *log.Logger) CommandResponse {
+	return func(cmd string, logger *log.Logger) CommandResponse {
+		switch cmd {
+		case "routes":
+			var output []map[string]interface{}
+			for _, r := range deps.Routes.AllRoutes() {
+				output = append(output, map[string]interface{}{
+					"network": r.Network,
+					"prefix":  r.Prefix,
+					"peer":    r.PeerID,
+					"metric":  r.Metric,
+					"expires": formatExpiry(r.ExpiresAt),
+				})
+			}
+			return CommandResponse{Status: "ok", Output: output}
 
-	case "reload":
-		cfg, err := config.Load(GetConfigPath())
-		if err != nil {
+		case "peers":
+			var output []map[string]interface{}
+			for _, p := range deps.Peers.ListPeers() {
+				output = append(output, map[string]interface{}{
+					"id":        p.ID,
+					"last_seen": p.LastSeen.Format(time.RFC3339),
+				})
+			}
+			return CommandResponse{Status: "ok", Output: output}
+
+		case "status":
+			resp := map[string]interface{}{
+				"uptime": Uptime(),
+				"peers":  len(deps.Peers.ListPeers()),
+				"routes": len(deps.Routes.AllRoutes()),
+			}
+			return CommandResponse{Status: "ok", Output: resp}
+
+		case "reload":
+			return handleReload(deps, logger)
+
+		case "goodbye":
+			deps.Peers.DisconnectAll()
 			return CommandResponse{
-				Status: "error",
-				Error:  "failed to reload config: " + err.Error(),
-			}
-		}
-
-		// 🔍 Static validation
-		seenNames := make(map[string]bool)
-		for name, net := range cfg.Networks {
-			if seenNames[name] {
-				return CommandResponse{
-					Status: "error",
-					Error:  "duplicate network name: " + name,
-				}
-			}
-			seenNames[name] = true
-
-			if net.Address != "auto" && net.Address == "" {
-				return CommandResponse{
-					Status: "error",
-					Error:  "network " + name + " must have address or use auto",
-				}
+				Status: "ok",
+				Output: map[string]interface{}{"message": "sent goodbye to all peers"},
 			}
 
-			_, err := netip.ParsePrefix(net.Prefix)
-			if err != nil {
-				return CommandResponse{
-					Status: "error",
-					Error:  "invalid prefix for network " + name + ": " + err.Error(),
-				}
-			}
-		}
-
-		if cfg.Identity.Fingerprint == "" || cfg.Identity.Cert == "" || cfg.Identity.Key == "" {
-			return CommandResponse{
-				Status: "error",
-				Error:  "identity section is incomplete",
-			}
-		}
-
-		// 🧠 If passed, apply
-		RegisterNetConfig(cfg.Networks)
-		routeTable := GetRouteTable()
-		peerTracker := GetPeerTracker()
-		routeTable.RemoveByPeer(cfg.Identity.Fingerprint)
-
-		for name, net := range cfg.Networks {
-			route := netgraph.Route{
-				Prefix: net.Prefix,
-				PeerID: cfg.Identity.Fingerprint,
-				Metric: 1,
-			}
-
-			for _, p := range peerTracker.ListPeers() {
-				SendRouteToPeer(p.ID, name, route)
-			}
-		}
-
-		return CommandResponse{
-			Status: "ok",
-			Output: map[string]interface{}{
-				"message": "config validated, reloaded, and routes re-announced",
-			},
-		}
-
-	case "goodbye":
-		TriggerGoodbye()
-		return CommandResponse{
-			Status: "ok",
-			Output: map[string]interface{}{
-				"message": "sent goodbye to all peers",
-			},
-		}
-
-	default:
-		logger.Warnf("Unknown control command: %s", cmd)
-		return CommandResponse{
-			Status: "error",
-			Error:  "unknown command: " + cmd,
+		default:
+			logger.Warnf("Unknown control command: %s", cmd)
+			return CommandResponse{Status: "error", Error: "unknown command: " + cmd}
 		}
 	}
+}
+
+func handleReload(deps ServerDeps, logger *log.Logger) CommandResponse {
+	cfg, err := config.Load(deps.ConfigPath)
+	if err != nil {
+		return CommandResponse{Status: "error", Error: "failed to reload config: " + err.Error()}
+	}
+	if err := cfg.Validate(); err != nil {
+		return CommandResponse{Status: "error", Error: "invalid config: " + err.Error()}
+	}
+
+	// Re-announce local routes to all live peers.
+	deps.Routes.RemoveByPeer(deps.IdentityFP)
+	for name, netCfg := range cfg.Networks {
+		if !netCfg.Export {
+			continue
+		}
+		route := netgraph.Route{
+			Network: name,
+			Prefix:  netCfg.Prefix,
+			PeerID:  deps.IdentityFP,
+			Metric:  1,
+		}
+		deps.Routes.AddRoute(route)
+
+		for _, p := range deps.Peers.ListPeers() {
+			if err := deps.Peers.SendRoute(p.ID, name, route); err != nil {
+				logger.Warnf("Failed to announce route to %s: %v", p.ID, err)
+			}
+		}
+	}
+
+	// Reconcile the peer set (add new peers, update addresses).
+	if err := deps.Peers.ReconcilePeers(cfg); err != nil {
+		logger.Warnf("Peer reconciliation failed: %v", err)
+	}
+
+	return CommandResponse{
+		Status: "ok",
+		Output: map[string]interface{}{
+			"message": "config validated, reloaded, and routes re-announced",
+		},
+	}
+}
+
+func formatExpiry(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return t.Format(time.RFC3339)
 }

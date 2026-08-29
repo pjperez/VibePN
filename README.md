@@ -1,25 +1,26 @@
 # VibePN
 
-VibePN is a peer-to-peer VPN daemon written in Go. It uses QUIC for encrypted transport, TUN interfaces for packet I/O, and route announcements over a control stream.
+VibePN is a peer-to-peer VPN daemon written in Go. It creates encrypted overlay
+networks between nodes using QUIC for transport, TUN interfaces for packet I/O,
+and certificate-fingerprint (TOFU) identity for authentication.
 
-## Current Status
+## Features
 
-This repository builds and runs, but it is still in active stabilization.  
-The following high-impact issues were fixed in this pass:
-
-- `log.Fatalf` now terminates the process (previously it only logged).
-- Network config is now registered in the control package at startup and on `reload`.
-- `reload` now reads from the daemon's configured config path instead of a hardcoded `~` path.
-- Outbound peer handshake no longer writes an extra raw nonce payload that broke control-stream framing.
-- Raw packet stream framing is now consistent (network context + `2-byte length + packet`) between sender and receiver.
-- Duplicate outbound TUN sender setup was removed from `cmd/vpn` to avoid conflicting packet readers.
-- Liveness tracker now respects the timeout passed by `NewLivenessTracker(...)`.
-- Raw data-plane framing now includes network context (`network + packet length + packet`) so inbound routing can target the correct interface.
-- Inbound forwarding now writes packets to the mapped TUN device for the decoded network instead of a single hardcoded device.
-- Stream-open operations in high-traffic/control paths now use bounded timeouts to reduce blocking risk on degraded peers.
-- Global control net-config state is now protected with mutexed access and defensive map copies.
-- TOFU verification now rejects certificates that are not yet valid or already expired.
-- Added initial unit tests for `config.ResolveAddressForNetwork`.
+- **Encrypted transport** — QUIC (TLS 1.3) with ALPN `vibepn/0.1`.
+- **Trust on first use** — peer certificates are pinned by SHA-256 fingerprint
+  on both the dialing *and* accepting side; expired/invalid certs are rejected.
+- **Multi-network** — one TUN device per named overlay network, each with its
+  own prefix and export policy.
+- **Deterministic addressing** — `address = "auto"` derives a stable per-node
+  IP from the node fingerprint and network name.
+- **Route learning** — peers announce/withdraw prefixes over a control stream;
+  the route table uses longest-prefix matching with metric preference.
+- **Route policy** — a peer may only announce routes for networks it is
+  configured for.
+- **Resilience** — automatic reconnects with exponential backoff + jitter,
+  keepalive-driven liveness tracking, and duplicate-connection replacement.
+- **Operability** — Unix-socket control CLI (`vpnctl`), Prometheus metrics,
+  structured leveled logging, and a `doctor` config checker.
 
 ## Build, Test, Vet
 
@@ -28,17 +29,11 @@ The following high-impact issues were fixed in this pass:
 go build -o vpn ./cmd/vpn
 go build -o vpnctl ./cmd/vpnctl
 
-# Run all tests (no test files yet)
-go test ./...
+# Run all tests (with race detector)
+go test -race ./...
 
 # Run static checks
 go vet ./...
-```
-
-Single-test command format (when tests are added):
-
-```bash
-go test ./path/to/package -run TestName
 ```
 
 ## Running
@@ -46,6 +41,19 @@ go test ./path/to/package -run TestName
 ```bash
 ./vpn -config /etc/vibepn/config.toml
 ```
+
+Daemon flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `-config` | `/etc/vibepn/config.toml` | Config file path |
+| `-socket` | `/var/run/vibepn.sock` | Control socket path |
+| `-listen` | `:51820` | QUIC listen address |
+| `-metrics` | `:9000` | Prometheus metrics address |
+| `-tofu` | `~/.vibepn/known_peers.json` | TOFU trust store path |
+
+Log verbosity is controlled with the `VIBEPN_LOG_LEVEL` environment variable
+(`debug`, `info`, `warn`, `error`).
 
 ## Run as a systemd service
 
@@ -69,7 +77,7 @@ sudo systemctl enable vibepn
 sudo systemctl start vibepn
 ```
 
-Control CLI (via Unix socket `/var/run/vibepn.sock`):
+Control CLI (via Unix socket):
 
 ```bash
 ./vpnctl status
@@ -77,6 +85,7 @@ Control CLI (via Unix socket `/var/run/vibepn.sock`):
 ./vpnctl routes
 ./vpnctl reload
 ./vpnctl goodbye
+./vpnctl --json status
 ```
 
 Onboarding helpers:
@@ -109,29 +118,31 @@ Onboarding helpers:
 
 ## Architecture (High Level)
 
-- `cmd/vpn`: daemon wiring (config, interfaces, QUIC listener, control server, route table, peer registry)
-- `peer`: peer connection management, control-message handling, liveness tracking
+- `cmd/vpn`: daemon wiring (config, interfaces, QUIC listener, control server,
+  route table, peer registry, connection manager)
+- `peer`: connection manager (dial/reconnect/backoff), control-message
+  handling, liveness tracking, route policy
+- `protocol`: binary control-plane message encoding/decoding (framed, length
+  prefixed, type-tagged)
 - `quic`: listener/accept loop and session stream handling
 - `forward`: packet forwarding between TUN and QUIC raw streams
-- `netgraph`: in-memory route table keyed by network
-- `control`: control protocol messages + local UDS command server
+- `netgraph`: in-memory route table with longest-prefix matching
+- `control`: local UDS command server (`status/routes/peers/reload/goodbye`)
+- `crypto`: TLS identity, TOFU trust store (client + server verification)
 - `iface` / `tun`: network interface setup and TUN device operations
+- `metrics`: Prometheus endpoint with packet/peer/route counters
+- `log`: leveled structured logger
 
-For full implementation detail and subsystem-by-subsystem completeness status, see:
+For full implementation detail, see `docs/architecture-deep-dive.md`.
 
-- `docs/architecture-deep-dive.md`
+## Security model
 
-## Major Completion Areas (Current)
-
-1. Testing and CI expansion (beyond initial config tests)
-2. Multi-network forwarding hardening and protocol evolution
-3. Control-plane reload semantics (full runtime reconfiguration)
-4. Session resilience under peer churn and packet loss
-5. Security/trust hardening for TOFU and operational key lifecycle
-
-## Known Gaps
-
-- Test coverage is still very limited (currently only `config/address` tests).
-- Peer reconnect exists but remains basic and lacks richer failure classification/backoff tuning.
-- `reload` revalidates/re-announces routes but does not reinitialize interfaces, peers, or listeners.
-- Route-policy enforcement for peer announcements is not yet implemented.
+- Every node has a self-signed ECDSA P-256 certificate.
+- Peers authenticate each other by the SHA-256 fingerprint of the presented
+  certificate.
+- The first time a peer is seen, its fingerprint is pinned in the TOFU store
+  (`~/.vibepn/known_peers.json`, mode 0600). Any later certificate for the
+  same peer name must match the pin or the connection is rejected.
+- Certificates outside their validity window are always rejected.
+- Route announcements are validated against the local network config and the
+  announcing peer's configured network assignments.

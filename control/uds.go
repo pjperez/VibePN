@@ -1,3 +1,4 @@
+// Package control: local Unix-domain-socket command server.
 package control
 
 import (
@@ -9,34 +10,75 @@ import (
 	"vibepn/log"
 )
 
-const udsTimeout = 2 * time.Second
+const udsTimeout = 5 * time.Second
 
-func StartUDS(path string) {
-	logger := log.New("control/uds")
+// Server serves vpnctl commands over a Unix domain socket.
+type Server struct {
+	path   string
+	handle func(cmd string, logger *log.Logger) CommandResponse
+	logger *log.Logger
+}
 
-	_ = os.Remove(path)
+// CommandRequest is the JSON request sent by vpnctl.
+type CommandRequest struct {
+	Cmd string `json:"cmd"`
+}
 
-	l, err := net.Listen("unix", path)
-	if err != nil {
-		logger.Fatalf("UDS listen error: %v", err)
-	}
+// CommandResponse is the JSON response returned to vpnctl.
+type CommandResponse struct {
+	Status string      `json:"status"`
+	Output interface{} `json:"output,omitempty"`
+	Error  string      `json:"error,omitempty"`
+}
 
-	if err := os.Chmod(path, 0o600); err != nil {
-		logger.Warnf("Failed to set socket permissions: %v", err)
-	}
-
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			logger.Warnf("UDS accept error: %v", err)
-			continue
-		}
-
-		go handleConn(conn, logger)
+// NewServer creates a command server bound to path.
+func NewServer(path string, handle func(cmd string, logger *log.Logger) CommandResponse) *Server {
+	return &Server{
+		path:   path,
+		handle: handle,
+		logger: log.New("control/uds"),
 	}
 }
 
-func handleConn(c net.Conn, logger *log.Logger) {
+// Start begins accepting connections in the background. It returns an error
+// channel that receives a fatal listen error, if any.
+func (s *Server) Start() <-chan error {
+	errCh := make(chan error, 1)
+
+	go func() {
+		_ = os.Remove(s.path)
+
+		l, err := net.Listen("unix", s.path)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer l.Close()
+
+		if err := os.Chmod(s.path, 0o600); err != nil {
+			s.logger.Warnf("Failed to set socket permissions: %v", err)
+		}
+
+		s.logger.Infof("Control socket listening on %s", s.path)
+		errCh <- nil
+
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				if os.IsTimeout(err) {
+					continue
+				}
+				s.logger.Warnf("UDS accept error: %v", err)
+				continue
+			}
+			go s.handleConn(conn)
+		}
+	}()
+
+	return errCh
+}
+
+func (s *Server) handleConn(c net.Conn) {
 	defer c.Close()
 
 	_ = c.SetDeadline(time.Now().Add(udsTimeout))
@@ -44,15 +86,15 @@ func handleConn(c net.Conn, logger *log.Logger) {
 	var req CommandRequest
 	dec := json.NewDecoder(c)
 	if err := dec.Decode(&req); err != nil {
-		logger.Warnf("UDS decode error: %v", err)
+		s.logger.Warnf("UDS decode error: %v", err)
 		return
 	}
 
-	logger.Infof("Received command: %s", req.Cmd)
-	resp := Handle(req.Cmd, nil, logger)
+	s.logger.Infof("Received command: %s", req.Cmd)
+	resp := s.handle(req.Cmd, s.logger)
 
 	enc := json.NewEncoder(c)
 	if err := enc.Encode(resp); err != nil {
-		logger.Warnf("UDS encode error: %v", err)
+		s.logger.Warnf("UDS encode error: %v", err)
 	}
 }

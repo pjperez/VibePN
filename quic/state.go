@@ -1,11 +1,36 @@
 package quic
 
-var ownFingerprint string
+import (
+	"sync"
 
-func SetOwnFingerprint(fingerprint string) {
-	ownFingerprint = fingerprint
+	"vibepn/config"
+)
+
+var (
+	netCfgMu sync.RWMutex
+	netCfg   = map[string]config.NetworkConfig{}
+)
+
+// SetNetConfig replaces the snapshot of local network configuration used for
+// route announcements.
+func SetNetConfig(nc map[string]config.NetworkConfig) {
+	copyCfg := make(map[string]config.NetworkConfig, len(nc))
+	for name, cfg := range nc {
+		copyCfg[name] = cfg
+	}
+
+	netCfgMu.Lock()
+	netCfg = copyCfg
+	netCfgMu.Unlock()
 }
 
-func GetOwnFingerprint() string {
-	return ownFingerprint
+func netConfigSnapshot() map[string]config.NetworkConfig {
+	netCfgMu.RLock()
+	defer netCfgMu.RUnlock()
+
+	out := make(map[string]config.NetworkConfig, len(netCfg))
+	for name, cfg := range netCfg {
+		out[name] = cfg
+	}
+	return out
 }

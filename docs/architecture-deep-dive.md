@@ -1,6 +1,6 @@
 # VibePN Architecture Deep Dive
 
-This document describes the current implementation in detail and evaluates how complete each subsystem is.
+This document describes the current implementation in detail.
 
 ## 1) System Purpose
 
@@ -21,68 +21,57 @@ Main binaries:
 
 `main()` wires all subsystems:
 
-1. Parses `-config` path (default `/etc/vibepn/config.toml`).
-2. Loads TOML config (`config.Load`).
-3. Loads local TLS identity (`crypto.LoadTLS`), validates optional expected fingerprint.
-4. Creates route table (`netgraph.NewRouteTable`).
-5. Creates liveness tracker (`peer.NewLivenessTracker`) + timeout watcher.
-6. Creates peer registry (`peer.NewRegistry`) and disconnect callback removing peer routes.
-7. Registers control-plane globals/callbacks (`control.Register`, `RegisterNetConfig`, `RegisterConfigPath`, goodbye callback).
-8. Initializes all local TUN interfaces (`iface.Init`).
-9. Starts one packet dispatcher goroutine per local network (`forward.Dispatcher.Start`).
-10. Creates inbound raw-stream handler (`forward.NewInbound`) with map of all network devices.
-11. Starts metrics server (`metrics.Serve(":9000")`).
-12. Starts local control socket server (`control.StartUDS("/var/run/vibepn.sock")`).
-13. Starts QUIC listener (`quic.Listen(":51820", tlsConf)`).
-14. Starts QUIC accept loop (`quic.AcceptLoop`).
-15. Starts outbound peer dial attempts (`peer.ConnectToPeers`).
-16. Installs SIGINT/SIGTERM shutdown handler (`registry.DisconnectAll`, then exit).
-17. Blocks forever (`select {}`).
+1. Parses flags (`-config`, `-socket`, `-listen`, `-metrics`, `-tofu`).
+2. Loads and validates TOML config (`config.Load` + `Config.Validate`).
+3. Loads local TLS identity (`crypto.LoadTLS`), enforces expected fingerprint.
+4. Loads the TOFU trust store and wraps the server TLS config so incoming
+   peer certificates are verified (server-side TOFU).
+5. Creates route table (`netgraph.NewRouteTable`), liveness tracker with
+   watcher, and peer registry with connect/disconnect callbacks.
+6. Registers local (self) routes for exported networks.
+7. Builds the route policy from config (peer → allowed networks).
+8. Registers control-plane wiring (`peer.RegisterControl`).
+9. Starts the connection manager (outbound dial loops per peer).
+10. Initializes TUN interfaces (`iface.Init`), starts one packet dispatcher
+    goroutine per network, and builds the inbound raw-stream handler.
+11. Starts metrics server and control socket server.
+12. Starts QUIC listener and accept loop.
+13. Installs SIGINT/SIGTERM shutdown handler.
 
 ### Control client (`cmd/vpnctl/main.go`)
 
 `vpnctl`:
 
-- Dials `/var/run/vibepn.sock`.
+- Dials the control socket (`-socket`, default `/var/run/vibepn.sock`).
 - Sends `{"cmd":"..."}` JSON.
 - Reads `CommandResponse`.
-- Supports `status|routes|peers|reload|goodbye`.
+- Supports `status|routes|peers|reload|goodbye` plus `version`.
 - Optional `--json` pretty-prints raw output.
 
 #### Onboarding commands (`init|invite|join|add-peer|doctor`)
 
-`vpnctl` also includes local onboarding helpers that operate on config/cert files:
-
-- `init`: generates a new self-signed cert/key pair, computes cert SHA-256 fingerprint, and writes a fresh config with one network and no peers.
-- `invite`: loads an existing config, requires an exported `--network`, and emits JSON (`version`, `network`, `prefix`, `inviter{name,address,fingerprint}`).
-- `join`: accepts exactly one of `--invite` or `--invite-file`, validates invite fields/CIDR, generates local identity, and writes a new config with the inviter pre-added as a peer.
-- `add-peer`: appends one peer entry (`name`, `address`, `fingerprint`, `networks`) to an existing config with basic validation.
-- `doctor`: runs local consistency checks across config parse, identity, CIDR/address formatting, fingerprint format, and peer network references.
-
-Current limitations:
-
-- These commands only read/write local files; they do not push updates into a running daemon process.
-- Invite payloads are plain JSON and are not signed, encrypted, or expiry-bound.
-- `join` writes a full target config and requires `--force` to overwrite existing config/cert/key files.
-- `add-peer` validates host:port, network references, optional fingerprint format, and duplicate peer names, but does not validate remote reachability.
+- `init`: generates a self-signed ECDSA P-256 cert/key pair, computes the
+  SHA-256 fingerprint, and writes a fresh config (atomic write, mode 0600).
+- `invite`: emits a JSON invite payload for an exported network.
+- `join`: validates an invite payload, generates local identity, writes a
+  config with the inviter pre-added as a peer.
+- `add-peer`: appends a peer entry with validation.
+- `doctor`: runs local consistency checks (config parse, identity, CIDR,
+  addresses, fingerprints, peer network references).
 
 ## 3) Configuration Model (`config/`)
 
 ### Schema (`config.Config`)
 
-- `identity`:
-  - `cert` path
-  - `key` path
-  - `fingerprint` (optional pin)
-- `peers[]`:
-  - `name`
-  - `address` (`host:port`)
-  - `fingerprint` (optional pin in config, not currently enforced in dial path)
-  - `networks` (declared intended peer networks; currently informational in runtime)
-- `networks.<name>`:
-  - `address` (`auto` or static IP)
-  - `prefix` CIDR
-  - `export` route advertisement toggle
+- `identity`: `cert`, `key`, `fingerprint` (optional pin).
+- `peers[]`: `name`, `address` (`host:port`), `fingerprint` (optional; empty
+  means TOFU), `networks` (allowed networks for route announcements).
+- `networks.<name>`: `address` (`auto` or static IP), `prefix` CIDR, `export`.
+
+### Validation (`Config.Validate`)
+
+Checks identity fields, fingerprint format, network prefix/address validity,
+peer address format, duplicate peer names, and peer network references.
 
 ### Address resolution (`config/address.go`)
 
@@ -90,202 +79,137 @@ Current limitations:
 
 - Static mode: validates IP parse.
 - Auto mode:
-  - Parses CIDR (IPv4 only).
+  - Parses CIDR (IPv4 only, requires ≥2 host bits).
   - Hashes `network + ":" + nodeID`.
-  - Derives host offset inside subnet.
-  - Avoids network/broadcast hosts.
-
-Tests exist only for this package (`config/address_test.go`).
+  - Derives a host offset that never lands on the network or broadcast
+    address.
 
 ## 4) Network Interface Layer (`iface/`, `tun/`)
 
 ### Interface manager (`iface.Init`)
 
-For each configured network:
-
-- Resolves IP address.
-- Computes CIDR with network mask from `prefix`.
-- Calls `tun.Open(cidr, nodeID)`.
-- Stores in `map[networkName]*tun.Device`.
-
-Failures are logged and skipped per-network; init succeeds if at least one device was created.
+For each configured network: resolves the IP, computes the CIDR with the
+network mask, opens a TUN device, and stores it by network name. Networks that
+fail are skipped; init fails only if no device could be created.
 
 ### TUN device implementation (`tun/device.go`)
 
-`tun.Open`:
+`tun.Open(cidr, nodeID, networkName)`:
 
-- Creates TUN interface (`water.New`).
-- Renames to deterministic `vibepn-<sha256(nodeID)[:6]>`.
-- Configures IP via shell commands:
-  - `ip addr add <cidr> dev <name>`
-  - `ip link set up dev <name>`
-
-`tun.Device` methods:
-
-- `Read([]byte)`, `Write([]byte)`, `Close()`, `Name()`.
-
-Note: `tun/reader.go` contains channel-based reader utility that is currently unused by main flow.
+- Creates the TUN interface (`water.New`).
+- Renames it to a deterministic per-network name
+  `vibepn-<hash(nodeID)[:6]>-<hash(networkName)[:4]>` (≤15 chars), so multiple
+  networks do not collide.
+- Configures the IP via `ip addr add` / `ip link set up`.
 
 ## 5) QUIC Transport and Session Model (`quic/`)
 
 ### Listener
 
-`quic.Listen(addr, tlsConf)`:
-
-- Uses `quic-go`.
-- Enables datagrams in config, but current data path uses streams only.
+`quic.Listen(addr, tlsConf)` uses quic-go with keepalives, a 90s idle timeout,
+and 1024 max incoming streams.
 
 ### Accept loop
 
-`quic.AcceptLoop(listener, tracker, routes, registry, inbound)`:
+`quic.AcceptLoop(listener, registry, inbound, tofu)`:
 
-- Accepts incoming QUIC connection.
-- Extracts peer cert fingerprint (`sha256(cert.Raw)`).
-- Generates local tie-break nonce and immediately calls `registry.Add(peerID, conn, nonce)`.
-- Starts per-connection session handler goroutine.
+- Accepts incoming QUIC connections (TLS layer already verified the peer cert
+  via TOFU).
+- Extracts the peer certificate SHA-256 fingerprint and resolves it to the configured peer name via the TOFU store (falling back to the raw fingerprint).
+- Registers the connection and starts a session handler.
 
 ### Session handling
 
 `handleSession`:
 
-1. Accepts first stream as control stream.
-2. Sends Hello control message with nonce.
-3. Announces exported routes from `control.GetNetConfig()`.
-4. Starts `peer.HandleControlStream` on that control stream.
-5. Accepts additional streams as raw streams and routes them to `forward.Inbound`.
+1. Accepts the first stream as the control stream (10s timeout).
+2. Sends a Hello message.
+3. Announces exported routes from the net-config snapshot.
+4. Starts the keepalive writer and control reader.
+5. Accepts further streams as raw packet streams → `forward.Inbound`.
 
-## 6) Peer Lifecycle and Control Protocol (`peer/`, `control/`)
+## 6) Peer Lifecycle and Control Protocol (`peer/`, `protocol/`)
 
-## 6.1 Outbound peer connect (`peer.ConnectToPeers`)
+### Connection manager (`peer/manager.go`)
 
-For each configured peer (one goroutine each):
+One goroutine per configured peer:
 
-1. Builds TLS config via TOFU (`crypto.LoadPeerTLSWithTOFU`).
-2. Dials QUIC with 5s timeout.
-3. Opens control stream with 2s timeout.
-4. Sends Hello nonce.
-5. Stores nonce in global nonce map.
-6. Adds connection to registry (duplicate tie-break logic).
-7. Sends Route-Announce for each exported local network.
-8. Starts keepalive loop.
-9. Starts control stream reader (`HandleControlStream`).
+1. Skips dialing while a live connection exists (5s poll).
+2. Builds a client TLS config from the TOFU store.
+3. Dials QUIC with a 5s timeout.
+4. Opens the control stream, sends Hello, registers the connection.
+5. Announces exported routes.
+6. Starts keepalive writer + control reader.
+7. Blocks until the connection dies, then reconnects with exponential backoff
+   (2s → 30s) plus ±30% jitter.
 
-Current behavior: one-shot dial attempt per peer; no reconnect loop/backoff.
+### Registry (`peer/registry.go`)
 
-## 6.2 Registry (`peer/registry.go`)
+- `conns map[peerID]quic.Connection` keyed by peer name (dialer) or
+  fingerprint (acceptor).
+- `Add` replaces any existing connection (the loser is closed), fires
+  `onConnect`, and spawns a watcher that removes the connection on close and
+  fires `onDisconnect` only if it was still the active one.
+- `DisconnectAll` sends a Goodbye over a fresh stream, then closes sessions.
+- Implements `control.PeerManager` (`ListPeers`, `SendRoute`, `ReconcilePeers`,
+  `DisconnectAll`).
 
-State:
+### Control protocol (`protocol/protocol.go`)
 
-- `conns map[peerID]quic.Connection`.
-- callbacks: `onConnect`, `onDisconnect`.
-- identity/netcfg snapshots.
-- global `peerNonces` map (package-level, not per-registry instance).
+All control messages are framed as `2-byte big-endian length + payload`, where
+the payload starts with a type byte:
 
-Duplicate connection handling (`Add`):
+- `H` Hello: `8-byte nonce`
+- `A` Route-Announce: `1-byte networkLen + network + repeated (1-byte prefixLen
+  + prefix + 2-byte metric)`
+- `W` Route-Withdraw: `1-byte networkLen + network + 1-byte prefixLen + prefix`
+- `K` Keepalive: `8-byte unix timestamp`
+- `G` Goodbye: empty body
 
-- If existing connection for same peer:
-  - Reads stored peer nonce.
-  - Lower nonce wins.
-  - Loser connection is closed.
+Encoding/decoding is fully unit-tested, including malformed-input rejection.
 
-Disconnect behavior:
+### Control stream handling (`peer/control.go`)
 
-- Connection watcher goroutine removes closed session from map.
-- `DisconnectAll` attempts goodbye stream (2s timeout), then closes all sessions.
+- Hello: logged (tie-break handled by connection replacement).
+- Route-Announce: each prefix is validated against the route policy before
+  being added to the route table.
+- Route-Withdraw: removes the matching route.
+- Keepalive: updates liveness.
+- Goodbye: closes the connection.
 
-## 6.3 Control protocol framing (`control/send.go`, `peer/manager.go`)
+### Route policy (`peer/control.go`)
 
-All control messages use:
+`ConfigRoutePolicy.Allow(peerID, network, prefix)`:
 
-- 2-byte big-endian message length
-- payload:
-  - first byte = type
-  - remaining bytes = type-specific body
+- Rejects unknown networks and malformed CIDRs.
+- If the peer has configured network assignments, only those are allowed.
+- Peers without assignments may announce any configured network (open policy).
 
-Types:
+### Liveness (`peer/liveness.go`)
 
-- `H` (Hello): `8-byte nonce`
-- `A` (Route-Announce):
-  - `1-byte networkLen`
-  - `networkName`
-  - repeated route tuples:
-    - `1-byte prefixLen`
-    - `prefix`
-    - `2-byte metric`
-- `W` (Route-Withdraw):
-  - `networkName` + one prefix
-- `K` (Keepalive): `8-byte unix timestamp`
-- `G` (Goodbye): empty body
-
-Control message decode logic is in `peer.HandleControlStream`.
-
-## 6.4 Keepalive (`control/keepalive.go`)
-
-- Every 10s, sends Keepalive message on stream.
-- Stops loop on first send error.
-
-Current behavior: no explicit cancellation channel; exits only on stream write error.
-
-## 6.5 Local control socket API (`control/uds.go`, `control/handlers.go`)
-
-UDS server:
-
-- Socket path is removed then recreated.
-- Permission set to `0600`.
-- Per-connection 2s deadline.
-
-Commands:
-
-- `status`: uptime + peer count + route count.
-- `peers`: tracker peer list.
-- `routes`: route table dump.
-- `reload`:
-  - reloads config from registered path.
-  - validates networks + identity fields.
-  - registers new net config snapshot.
-  - removes self routes by fingerprint.
-  - re-announces configured networks to connected peers.
-- `goodbye`: triggers registered shutdown callback.
+- `MarkAlive`/`UpdatePeer` record last-seen timestamps.
+- The watcher sweeps at an interval scaled to the timeout, removes stale peers,
+  and drops their routes.
 
 ## 7) Data Plane (`forward/`)
 
-## 7.1 Outbound forwarding (`forward/dispatcher.go`)
+### Outbound forwarding (`forward/dispatcher.go`)
 
 One goroutine per local network device:
 
-1. Reads packet from network-specific TUN device.
-2. Extracts destination IP (IPv4 only).
-3. Looks up first matching route in route table for this same network.
-4. Gets peer session from registry.
-5. Opens raw stream with 2s timeout.
-6. Writes packet frame:
-   - `1-byte networkName length`
-   - `networkName bytes`
-   - `2-byte packet length`
-   - raw packet bytes
-7. Closes stream.
+1. Reads a packet from the network TUN.
+2. Extracts the destination IPv4.
+3. Looks up the best route (`netgraph.RouteTable.Lookup`, longest-prefix +
+   metric).
+4. Opens a raw stream with a 5s timeout.
+5. Writes the frame: `1-byte networkLen + network + 2-byte packetLen + packet`.
+6. Closes the stream.
 
-Route lookup currently scans routes linearly and returns first CIDR match (no longest-prefix selection).
+### Inbound forwarding (`forward/inbound.go`)
 
-## 7.2 Inbound forwarding (`forward/inbound.go`)
-
-For each accepted raw stream:
-
-Loop:
-
-1. Read `networkName length` (1 byte).
-2. Read `networkName`.
-3. Read packet length (2 bytes).
-4. Read packet bytes.
-5. Find local `tun.Device` by network name from map.
-6. Write packet into corresponding TUN.
-
-If network name is unknown locally, packet is dropped and loop continues.
-
-## 7.3 Legacy outbound path (`forward/outbound.go`)
-
-`Outbound.SendPackets` exists but is currently not wired from `cmd/vpn/main.go`.
-It uses older framing (`packetLen + packet` only) and a single long-lived stream.
+For each accepted raw stream, decodes frames and writes packets into the TUN
+device for the announced network. Unknown networks drop the packet and
+continue.
 
 ## 8) Routing Model (`netgraph/`)
 
@@ -293,160 +217,87 @@ It uses older framing (`packetLen + packet` only) and a single long-lived stream
 
 - `routes map[network][]Route`.
 - `AddRoute` deduplicates on `(network, prefix, peerID)`.
-- `RemoveByPeer` removes all routes for disconnected peer.
-- `RemoveRoute(network,prefix)` removes matching prefix in one network.
-- `RoutesForNetwork(network, excludePeer)` returns copy filtered by peer.
-- `AllRoutes` flattens all network route slices.
+- `Lookup(network, ip)` returns the longest-prefix match, preferring lower
+  metrics on ties.
+- `RemoveByPeer`, `RemoveRoute`, `RoutesForNetwork`, `AllRoutes`, `ReapExpired`.
+- `Route.ExpiresAt` (zero = never) is honored by lookups and reaping.
 
-`Route.ExpiresAt` exists but expiry logic is not currently populated by route announcements.
+## 9) Security and Trust Model (`crypto/`)
 
-## 9) Liveness Model (`peer/liveness.go`)
+### Local identity (`crypto/identity.go`)
 
-`LivenessTracker`:
+- Loads the local cert/key pair, computes the SHA-256 fingerprint, optionally
+  enforces the configured expected fingerprint.
+- Sets ALPN `vibepn/0.1`.
 
-- Maintains `map[peerID]PeerState{LastSeen}`.
-- `UpdatePeer`/`MarkAlive` set current timestamp.
-- Watcher ticker every 10s:
-  - removes peers with `now - LastSeen > timeout`.
-  - removes peer routes from route table.
+### TOFU store (`crypto/tofu.go`)
 
-Liveness updates currently depend on received keepalive messages in control stream.
+- `TOFUStore` persists `peerName → fingerprint` to a JSON file (mode 0600,
+  atomic writes).
+- `ClientTLS` presents the local cert and verifies the peer via TOFU.
+- `ServerTLS` wraps the server config so incoming peer certs are verified too.
+- Verification rejects missing certs, expired/not-yet-valid certs, and
+  fingerprint mismatches; first sight pins the fingerprint.
 
-## 10) Security and Trust Model (`crypto/`)
-
-## 10.1 Local identity (`crypto/identity.go`)
-
-- Loads local cert/key pair.
-- Computes cert fingerprint.
-- Optionally enforces expected fingerprint from config.
-- Sets ALPN protocol `vibepn/0.1`.
-
-## 10.2 Peer TOFU (`crypto/tofu.go`)
-
-Dial path uses:
-
-- `InsecureSkipVerify: true`
-- custom `VerifyPeerCertificate` callback:
-  - parse peer certificate
-  - reject certs outside validity window (`NotBefore`/`NotAfter`)
-  - fingerprint peer cert
-  - load/compare/store fingerprint in TOFU file (`~/.vibepn/known_peers.json`)
-
-TOFU store properties:
-
-- directory mode `0700`, file mode `0600`.
-- keyed by peer name (`peerName -> fingerprint`).
-
-## 11) Metrics and Logging
+## 10) Metrics and Logging
 
 ### Metrics (`metrics/http.go`)
 
-- Exposes Prometheus handler on `/metrics`.
-- Served via `http.ListenAndServe`.
+Prometheus endpoint on `/metrics` with:
+
+- `vibepn_packets_forwarded_total{network}`
+- `vibepn_packets_received_total{network}`
+- `vibepn_packets_dropped_total{reason}`
+- `vibepn_active_peers`
+- `vibepn_routes`
+- `vibepn_uptime_seconds`
 
 ### Logging (`log/logger.go`)
 
-Structured single-line format:
+- Leveled (`debug|info|warn|error|fatal`), controlled by `VIBEPN_LOG_LEVEL`.
+- Single-line format: `[RFC3339 UTC] LEVEL [component] message`.
+- `Fatalf` logs and exits with status 1.
 
-`[RFC3339 UTC timestamp] LEVEL  [component] message`
+## 11) End-to-End Flows
 
-`Fatalf` logs and exits process with status 1.
-
-## 12) Global State Inventory
-
-The codebase uses several package-level mutable states:
-
-- `control` package:
-  - route table pointer
-  - peer tracker pointer
-  - sendRoute function pointer
-  - goodbye callback
-  - startup time
-  - config path
-  - network config snapshot (RWMutex-protected)
-- `quic` package:
-  - `ownFingerprint` string
-- `peer` package:
-  - global nonce map (`peerNonces`)
-- `crypto` package:
-  - TOFU path/store/mutex
-
-These are central to runtime behavior and make reset/isolation in tests harder.
-
-## 13) End-to-End Flows
-
-## 13.1 Outbound packet flow (local -> remote)
+### Outbound packet flow (local → remote)
 
 1. Packet enters local TUN for network `N`.
-2. Dispatcher `Start(N, dev)` reads packet.
-3. Destination IP parsed.
-4. Route matched in `RouteTable` under network `N`.
-5. Peer connection fetched from registry.
-6. Raw stream opened.
-7. Frame written: network + length + packet.
-8. Remote inbound handler writes packet to remote TUN for same network name.
+2. Dispatcher reads it, parses the destination IP.
+3. Route table returns the best route for `N`.
+4. Peer connection fetched from registry.
+5. Raw stream opened, frame written (network + length + packet).
+6. Remote inbound handler writes the packet to the remote TUN for `N`.
 
-## 13.2 Inbound route learning
+### Inbound route learning
 
-1. Peer sends control `A` message on control stream.
-2. `peer.HandleControlStream` parses route announce.
-3. Adds learned route(s) with `Network`, `Prefix`, `PeerID`, `Metric`.
-4. Dispatcher can now route packets matching those prefixes.
+1. Peer sends Route-Announce on the control stream.
+2. Each prefix is validated by the route policy.
+3. Approved routes are added with `Network`, `Prefix`, `PeerID`, `Metric`.
+4. The dispatcher can now route matching packets to that peer.
 
-## 13.3 Reload flow
+### Reload flow
 
-1. `vpnctl reload` sends command over UDS.
-2. `control.Handle("reload")` reloads and validates config file.
-3. Replaces `control` network-config snapshot.
-4. Removes self routes by local fingerprint.
-5. Re-announces configured networks to currently known peers.
+1. `vpnctl reload` sends a command over the UDS.
+2. `control.Handler` reloads and validates the config.
+3. Self routes are re-added and re-announced to live peers.
+4. Peer reconciliation is invoked (currently a no-op hook; connection manager
+   owns dialing).
 
-No reinit of interfaces, listener, or peer dial topology is performed.
-
-## 14) Implementation Completeness Assessment
-
-Status key:
-
-- **Complete**: implemented and wired in main flow.
-- **Partial**: implemented but with notable limitations.
-- **Missing**: expected production capability not present.
+## 12) Implementation Completeness Assessment
 
 | Area | Status | Notes |
 |---|---|---|
-| Daemon bootstrap and basic run loop | Complete | Main startup/shutdown path is wired and buildable. |
-| Multi-network local interface creation | Complete | Multiple network devices are created and tracked by name. |
-| Raw packet framing consistency | Complete | Outbound and inbound use same network-aware binary frame. |
-| Data-plane routing correctness basics | Partial | First-match CIDR lookup only; no longest-prefix preference or policy checks. |
-| Peer dial lifecycle | Partial | Includes reconnect loop with bounded backoff, but lacks jitter, richer failure classification, and lifecycle controls. |
-| Duplicate connection tie-break | Partial | Nonce tie-break exists, but lifecycle races still possible under churn. |
-| Control command surface (`status/routes/peers/reload/goodbye`) | Complete | CLI and UDS handlers are wired end-to-end. |
-| Reload semantics | Partial | Re-announces routes but does not reconfigure interfaces, peer set, or listeners. |
-| Route expiry handling | Missing | `ExpiresAt` field exists but not actively driven by protocol timers. |
-| Access control on route announcements | Missing | No enforcement that peer may only announce allowed networks/prefixes. |
-| Security (TOFU + cert validity windows) | Partial | Fingerprint pinning + validity checks exist; trust still keyed only by peer name. |
-| Tests | Partial | Only `config/address` tests currently exist; most subsystems untested. |
-| CI pipeline | Complete | Basic GitHub Actions workflow exists at `.github/workflows/ci.yml` for test/vet/build. |
-| Observability metrics breadth | Partial | Prometheus endpoint exists, but no custom counters/gauges emitted yet. |
-
-## 15) High-Priority Remaining Work
-
-1. **Reconnect/backoff strategy**
-   - Add persistent connection manager loop per peer.
-2. **Reload semantics completion**
-   - Define/implement what is hot-reloaded (interfaces, peers, routes) and synchronize transitions.
-3. **Route policy + validation**
-   - Validate announced routes against configured peer/network policy.
-4. **Routing algorithm improvements**
-   - Longest-prefix match and deterministic best-route selection.
-5. **Test coverage expansion**
-   - Add unit tests for control, registry, route table, forwarding framing, and TOFU behavior.
-6. **CI depth expansion**
-   - Add matrix/coverage/race checks beyond the current baseline workflow.
-
-## 16) Notes on Documentation Accuracy
-
-This deep dive reflects the current code under:
-
-- `cmd/`, `config/`, `control/`, `crypto/`, `forward/`, `iface/`, `log/`, `metrics/`, `netgraph/`, `peer/`, `quic/`, `tun/`, and `shared/`.
-
-If runtime behavior differs from this document, the code is the source of truth and the doc should be updated immediately.
+| Daemon bootstrap and shutdown | Complete | Flag-driven, validated config, graceful shutdown. |
+| Multi-network TUN setup | Complete | Deterministic per-network device names. |
+| Raw packet framing | Complete | Network-aware frames, shared encode/decode. |
+| Routing | Complete | Longest-prefix + metric preference, expiry. |
+| Peer dial lifecycle | Complete | Reconnect loop, exponential backoff + jitter. |
+| Duplicate connection handling | Complete | New connection replaces old; loser closed. |
+| Control command surface | Complete | status/routes/peers/reload/goodbye/version. |
+| Reload semantics | Partial | Re-announces routes; interface/listener reinit not yet supported. |
+| Route policy | Complete | Peer network assignments enforced. |
+| TOFU security | Complete | Client + server verification, validity windows, persistence. |
+| Tests | Partial | config, crypto, protocol, netgraph, control, peer, forward, tun; more coverage welcome. |
+| CI | Complete | Build, vet, race tests on push/PR. |
+| Observability | Complete | Custom Prometheus counters/gauges. |

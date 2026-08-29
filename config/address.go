@@ -8,6 +8,9 @@ import (
 	"net"
 )
 
+// ResolveAddressForNetwork returns the local IP address for a network:
+// the configured static address, or a deterministic address derived from
+// the network name and node ID when configured as "auto".
 func ResolveAddressForNetwork(
 	network string,
 	nodeID string,
@@ -38,35 +41,48 @@ func ResolveAddressForNetwork(
 }
 
 func deriveAutoAddress(network, nodeID, prefix string) (string, error) {
-	_, ipnet, err := net.ParseCIDR(prefix)
+	ip, ipnet, err := net.ParseCIDR(prefix)
 	if err != nil {
 		return "", fmt.Errorf("invalid CIDR prefix for %s: %v", network, err)
 	}
 
 	ones, bits := ipnet.Mask.Size()
-	if bits != 32 || ones >= 31 {
-		return "", errors.New("only IPv4 prefixes < /31 are supported")
+	if bits != 32 {
+		return "", errors.New("only IPv4 prefixes are supported for auto addresses")
+	}
+	hostBits := 32 - ones
+	if hostBits < 2 {
+		return "", errors.New("prefix must have at least 2 host bits (a /30 or smaller)")
 	}
 
-	// Hash of network + nodeID ensures unique IP per network per node
+	// Hash of network + nodeID ensures a deterministic IP per network per node.
 	h := sha256.Sum256([]byte(network + ":" + nodeID))
-	hostOffset := binary.BigEndian.Uint32(h[:4]) & ((1 << (32 - ones)) - 2) // exclude network/broadcast
+	hostOffset := binary.BigEndian.Uint32(h[:4]) & ((1 << hostBits) - 1)
 
-	base := ipnet.IP.To4()
+	base := ip.To4()
 	if base == nil {
 		return "", errors.New("prefix must be IPv4")
 	}
 
-	// Convert base IP to uint32, add offset, then back to IP
 	baseInt := binary.BigEndian.Uint32(base)
-	derived := baseInt + hostOffset
 
-	var ip net.IP = make([]byte, 4)
-	binary.BigEndian.PutUint32(ip, derived)
-
-	if !ipnet.Contains(ip) {
-		return "", fmt.Errorf("derived IP %s not in subnet %s", ip.String(), prefix)
+	// hostOffset == 0 would map to the network address itself; skip it.
+	if hostOffset == 0 {
+		hostOffset = 1
+	}
+	// The all-ones host offset is the broadcast address; skip it.
+	if hostOffset == (1<<hostBits)-1 {
+		hostOffset--
 	}
 
-	return ip.String(), nil
+	derived := baseInt + hostOffset
+
+	var out net.IP = make([]byte, 4)
+	binary.BigEndian.PutUint32(out, derived)
+
+	if !ipnet.Contains(out) {
+		return "", fmt.Errorf("derived IP %s not in subnet %s", out.String(), prefix)
+	}
+
+	return out.String(), nil
 }

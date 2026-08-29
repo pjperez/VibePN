@@ -4,7 +4,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -21,14 +20,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BurntSushi/toml"
-
 	"vibepn/config"
 	vpncrypto "vibepn/crypto"
 )
 
+// version is the vpnctl release version.
+const version = "0.2.0"
+
 const (
-	socketPath        = "/var/run/vibepn.sock"
+	defaultSocketPath = "/var/run/vibepn.sock"
 	defaultConfigPath = "/etc/vibepn/config.toml"
 	defaultCertPath   = "/etc/vibepn/certs/node.crt"
 	defaultKeyPath    = "/etc/vibepn/certs/node.key"
@@ -73,7 +73,9 @@ func main() {
 	var err error
 	switch cmd {
 	case "status", "routes", "peers", "reload", "goodbye":
-		err = runDaemonCommand(cmd, *jsonMode)
+		err = runDaemonCommand(cmd, *jsonMode, args)
+	case "version":
+		fmt.Printf("vpnctl %s\n", version)
 	case "init":
 		err = runInit(args)
 	case "invite":
@@ -110,12 +112,25 @@ func usage() {
 	flag.PrintDefaults()
 }
 
-func runDaemonCommand(cmd string, jsonMode bool) error {
+func runDaemonCommand(cmd string, jsonMode bool, args []string) error {
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	socket := fs.String("socket", defaultSocketPath, "Path to daemon control socket")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+
 	req := CommandRequest{Cmd: cmd}
 
-	conn, err := net.Dial("unix", socketPath)
+	conn, err := net.Dial("unix", *socket)
 	if err != nil {
-		return fmt.Errorf("failed to connect to socket: %w", err)
+		return fmt.Errorf("failed to connect to socket %s: %w", *socket, err)
 	}
 	defer conn.Close()
 
@@ -177,14 +192,10 @@ func runInit(args []string) error {
 		return fmt.Errorf("invalid --prefix %q: %w", *prefix, err)
 	}
 	if !*force {
-		if pathExists(*configPath) {
-			return fmt.Errorf("config %q already exists (use --force to overwrite)", *configPath)
-		}
-		if pathExists(*certPath) {
-			return fmt.Errorf("certificate %q already exists (use --force to overwrite)", *certPath)
-		}
-		if pathExists(*keyPath) {
-			return fmt.Errorf("private key %q already exists (use --force to overwrite)", *keyPath)
+		for _, p := range []string{*configPath, *certPath, *keyPath} {
+			if pathExists(p) {
+				return fmt.Errorf("%q already exists (use --force to overwrite)", p)
+			}
 		}
 	}
 
@@ -209,7 +220,7 @@ func runInit(args []string) error {
 		},
 	}
 
-	if err := writeConfig(*configPath, cfg); err != nil {
+	if err := config.Write(*configPath, cfg); err != nil {
 		return err
 	}
 
@@ -327,14 +338,10 @@ func runJoin(args []string) error {
 		return err
 	}
 	if !*force {
-		if pathExists(*configPath) {
-			return fmt.Errorf("config %q already exists (use --force to overwrite)", *configPath)
-		}
-		if pathExists(*certPath) {
-			return fmt.Errorf("certificate %q already exists (use --force to overwrite)", *certPath)
-		}
-		if pathExists(*keyPath) {
-			return fmt.Errorf("private key %q already exists (use --force to overwrite)", *keyPath)
+		for _, p := range []string{*configPath, *certPath, *keyPath} {
+			if pathExists(p) {
+				return fmt.Errorf("%q already exists (use --force to overwrite)", p)
+			}
 		}
 	}
 
@@ -366,7 +373,7 @@ func runJoin(args []string) error {
 		},
 	}
 
-	if err := writeConfig(*configPath, cfg); err != nil {
+	if err := config.Write(*configPath, cfg); err != nil {
 		return err
 	}
 
@@ -435,7 +442,7 @@ func runAddPeer(args []string) error {
 		Networks:    peerNetworks,
 	})
 
-	if err := writeConfig(*configPath, cfg); err != nil {
+	if err := config.Write(*configPath, cfg); err != nil {
 		return err
 	}
 
@@ -736,28 +743,7 @@ func generateIdentity(certPath, keyPath, commonName string) (string, error) {
 		return "", err
 	}
 
-	hash := sha256.Sum256(certDER)
-	return hex.EncodeToString(hash[:]), nil
-}
-
-func writeConfig(path string, cfg *config.Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("open config %q: %w", path, err)
-	}
-	defer f.Close()
-
-	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
-		return fmt.Errorf("encode config TOML: %w", err)
-	}
-	if err := os.Chmod(path, 0600); err != nil {
-		return fmt.Errorf("set config permissions: %w", err)
-	}
-	return nil
+	return vpncrypto.Fingerprint(certDER), nil
 }
 
 func writeStrictFile(path string, data []byte, mode os.FileMode) error {

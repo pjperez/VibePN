@@ -1,27 +1,35 @@
+// Package quic: QUIC listener and session handling.
 package quic
 
 import (
 	"context"
 	"crypto/tls"
-	"math/rand/v2"
+	"time"
 
-	"vibepn/control"
+	"vibepn/crypto"
 	"vibepn/forward"
 	"vibepn/log"
-	"vibepn/netgraph"
 	"vibepn/peer"
-
-	"crypto/sha256"
-	"encoding/hex"
+	"vibepn/protocol"
 
 	"github.com/quic-go/quic-go"
 )
 
+// quicConfig returns the shared QUIC configuration.
+func quicConfig() *quic.Config {
+	return &quic.Config{
+		EnableDatagrams:       false,
+		MaxIdleTimeout:        90 * time.Second,
+		KeepAlivePeriod:       15 * time.Second,
+		MaxIncomingStreams:    1024,
+		MaxIncomingUniStreams: -1,
+	}
+}
+
+// Listen starts a QUIC listener on addr.
 func Listen(addr string, tlsConf *tls.Config) (*quic.Listener, error) {
 	logger := log.New("quic/listener")
-	ln, err := quic.ListenAddr(addr, tlsConf, &quic.Config{
-		EnableDatagrams: true,
-	})
+	ln, err := quic.ListenAddr(addr, tlsConf, quicConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -29,12 +37,15 @@ func Listen(addr string, tlsConf *tls.Config) (*quic.Listener, error) {
 	return ln, nil
 }
 
+// AcceptLoop accepts connections, registers the connection, and starts a
+// session handler per connection. Peer certificates are verified by the TLS
+// layer (TOFU); the peer's configured name (resolved from the fingerprint) is
+// used as the registry key so route policy and liveness align with config.
 func AcceptLoop(
 	ln quic.Listener,
-	tracker *peer.LivenessTracker,
-	routes *netgraph.RouteTable,
 	registry *peer.Registry,
 	inbound *forward.Inbound,
+	tofu *crypto.TOFUStore,
 ) {
 	logger := log.New("quic/accept")
 
@@ -42,93 +53,83 @@ func AcceptLoop(
 		sess, err := ln.Accept(context.Background())
 		if err != nil {
 			logger.Errorf("Accept error: %v", err)
-			continue
-		}
-
-		logger.Infof("Accepted connection from %s", sess.RemoteAddr())
-
-		// 🧠 Extract fingerprint
-		connState := sess.ConnectionState()
-		if len(connState.TLS.PeerCertificates) == 0 {
-			logger.Warnf("No peer certificate presented")
-			_ = sess.CloseWithError(0, "missing peer cert")
-			continue
-		}
-		peerCert := connState.TLS.PeerCertificates[0]
-
-		// SHA256 fingerprint
-		fp := FingerprintCertificate(peerCert.Raw)
-
-		logger.Infof("Peer fingerprint: %s", fp)
-
-		// 🧠 NEW: Generate random TieBreakerNonce
-		myNonce := rand.Uint64()
-
-		// 🧠 Pass the nonce into registry.Add
-		registry.Add(fp, sess, myNonce)
-
-		go handleSession(sess, inbound, fp)
-	}
-}
-
-func FingerprintCertificate(cert []byte) string {
-	sum := sha256.Sum256(cert)
-	return hex.EncodeToString(sum[:])
-}
-
-func handleSession(sess quic.Connection, inbound *forward.Inbound, fingerprint string) {
-	logger := log.New("quic/session")
-
-	// Accept the first control stream
-	controlStream, err := sess.AcceptStream(context.Background())
-	if err != nil {
-		logger.Warnf("Failed to accept control stream: %v", err)
-		return
-	}
-	logger.Infof("Accepted control stream (id=%d)", controlStream.StreamID())
-
-	// 🧠 Immediately send Hello with my nonce (generate one)
-	myNonce := rand.Uint64()
-	err = control.SendHello(controlStream, myNonce)
-	if err != nil {
-		logger.Errorf("Failed to send Hello on incoming control stream: %v", err)
-		return
-	}
-
-	// 🧠 Immediately announce exported routes
-	for netName, netCfg := range control.GetNetConfig() {
-		if !netCfg.Export {
-			continue
-		}
-		err := control.SendRouteAnnounce(controlStream, netName, []string{netCfg.Prefix})
-		if err != nil {
-			logger.Warnf("Failed to announce route for network %s: %v", netName, err)
-		}
-	}
-
-	// 🧠 VERY IMPORTANT: Start control logic
-	go peer.HandleControlStream(sess, controlStream, fingerprint)
-
-	// Keep accepting further raw streams
-	for {
-		stream, err := sess.AcceptStream(context.Background())
-		if err != nil {
-			logger.Warnf("Stream accept error: %v", err)
 			return
 		}
 
-		go handleRawStream(stream, inbound)
+		connState := sess.ConnectionState()
+		if len(connState.TLS.PeerCertificates) == 0 {
+			logger.Warnf("No peer certificate presented by %s", sess.RemoteAddr())
+			_ = sess.CloseWithError(0, "missing peer cert")
+			continue
+		}
+		peerFP := crypto.Fingerprint(connState.TLS.PeerCertificates[0].Raw)
+
+		// Resolve the fingerprint to a configured peer name so route policy
+		// and liveness tracking use the same key as the dialer.
+		peerID := peerFP
+		if name, ok := tofu.NameForFingerprint(peerFP); ok {
+			peerID = name
+		}
+		logger.Infof("Accepted connection from %s (fingerprint %s, id %s)", sess.RemoteAddr(), peerFP, peerID)
+
+		registry.Add(peerID, sess)
+		go handleSession(sess, inbound, peerID)
 	}
 }
 
-func handleRawStream(stream quic.Stream, inbound *forward.Inbound) {
-	logger := log.New("quic/raw")
-	logger.Debugf("Raw stream accepted (id=%d)", stream.StreamID())
+// handleSession drives one accepted connection: it accepts the control stream,
+// performs the hello exchange, announces local routes, and then forwards raw
+// streams to the inbound handler.
+func handleSession(sess quic.Connection, inbound *forward.Inbound, peerID string) {
+	logger := log.New("quic/session")
 
-	if inbound != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	controlStream, err := sess.AcceptStream(ctx)
+	cancel()
+	if err != nil {
+		logger.Warnf("Failed to accept control stream from %s: %v", peerID, err)
+		return
+	}
+	logger.Infof("Accepted control stream (id=%d) from %s", controlStream.StreamID(), peerID)
+
+	// Send our hello.
+	if err := protocol.WriteMessage(controlStream, protocol.Hello{Nonce: uint64(time.Now().UnixNano())}); err != nil {
+		logger.Errorf("Failed to send Hello to %s: %v", peerID, err)
+		return
+	}
+
+	// Announce exported local routes.
+	announceRoutes(controlStream)
+
+	// Start the control reader and keepalive writer.
+	stopKeepalive := peer.StartKeepaliveLoop(controlStream)
+	defer stopKeepalive()
+	go peer.HandleControlStream(sess, controlStream, peerID)
+
+	// Accept raw packet streams.
+	for {
+		stream, err := sess.AcceptStream(context.Background())
+		if err != nil {
+			logger.Warnf("Stream accept error from %s: %v", peerID, err)
+			return
+		}
 		go inbound.HandleRawStream(stream)
-	} else {
-		logger.Warnf("Inbound handler not configured, dropping stream")
-		stream.CancelRead(0)
+	}
+}
+
+// announceRoutes sends route announcements for exported networks.
+func announceRoutes(stream quic.Stream) {
+	logger := log.New("quic/session")
+	for netName, netCfg := range netConfigSnapshot() {
+		if !netCfg.Export {
+			continue
+		}
+		if err := protocol.WriteMessage(stream, protocol.RouteAnnounce{
+			Network:  netName,
+			Prefixes: []string{netCfg.Prefix},
+			Metric:   1,
+		}); err != nil {
+			logger.Warnf("Failed to announce route for network %s: %v", netName, err)
+		}
 	}
 }

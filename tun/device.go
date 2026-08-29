@@ -5,19 +5,22 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"vibepn/log"
 
 	"github.com/songgao/water"
 )
 
+// Device wraps a TUN interface with a stable, per-network name.
 type Device struct {
 	iface *water.Interface
 	name  string
 	log   *log.Logger
 }
 
-func Open(cidr string, nodeID string) (*Device, error) {
+// Open creates a TUN device for a network and configures its IP.
+func Open(cidr string, nodeID string, networkName string) (*Device, error) {
 	config := water.Config{
 		DeviceType: water.TUN,
 	}
@@ -28,13 +31,10 @@ func Open(cidr string, nodeID string) (*Device, error) {
 	}
 
 	base := iface.Name()
-
-	// Hash nodeID to create deterministic suffix
-	h := sha256.Sum256([]byte(nodeID))
-	suffix := hex.EncodeToString(h[:])[:6]
-	newName := fmt.Sprintf("vibepn-%s", suffix)
+	newName := interfaceName(nodeID, networkName)
 
 	if err := renameInterface(base, newName); err != nil {
+		iface.Close()
 		return nil, fmt.Errorf("failed to rename %s to %s: %w", base, newName, err)
 	}
 
@@ -47,10 +47,26 @@ func Open(cidr string, nodeID string) (*Device, error) {
 	dev.log.Infof("Created TUN device %s (from %s)", newName, base)
 
 	if err := dev.configureIP(cidr); err != nil {
+		iface.Close()
 		return nil, fmt.Errorf("failed to configure IP: %w", err)
 	}
 
 	return dev, nil
+}
+
+// interfaceName derives a deterministic, per-network interface name:
+// vibepn-<hash(nodeID)>-<hash(networkName)> truncated to Linux's 15-char limit.
+func interfaceName(nodeID, networkName string) string {
+	nodeHash := sha256.Sum256([]byte(nodeID))
+	netHash := sha256.Sum256([]byte(networkName))
+	name := fmt.Sprintf("vibepn-%s-%s",
+		hex.EncodeToString(nodeHash[:])[:6],
+		hex.EncodeToString(netHash[:])[:4],
+	)
+	if len(name) > 15 {
+		name = name[:15]
+	}
+	return name
 }
 
 func renameInterface(oldName, newName string) error {
@@ -87,4 +103,9 @@ func (d *Device) Close() error {
 
 func (d *Device) Name() string {
 	return d.name
+}
+
+// sanitizeName is a helper for tests and diagnostics.
+func sanitizeName(name string) string {
+	return strings.TrimSpace(name)
 }

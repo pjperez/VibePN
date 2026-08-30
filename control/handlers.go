@@ -20,7 +20,8 @@ type PeerSender interface {
 	SendRoute(peerID, network string, route netgraph.Route) error
 }
 
-// PeerManager is the interface the daemon exposes to the control server.
+// PeerManager is the interface the daemon exposes to the control server for
+// connection management.
 type PeerManager interface {
 	PeerLister
 	PeerSender
@@ -33,6 +34,10 @@ type ServerDeps struct {
 	ConfigPath string
 	Routes     *netgraph.RouteTable
 	Peers      PeerManager
+	// Tracker reports liveness (last-seen) state; when set it is the source
+	// for the "peers" and "status" commands so stale QUIC connections that
+	// have stopped sending keepalives are surfaced promptly.
+	Tracker    PeerLister
 	IdentityFP string
 	Logger     *log.Logger
 }
@@ -56,7 +61,7 @@ func Handler(deps ServerDeps) func(cmd string, logger *log.Logger) CommandRespon
 
 		case "peers":
 			var output []map[string]interface{}
-			for _, p := range deps.Peers.ListPeers() {
+			for _, p := range peerList(deps).ListPeers() {
 				output = append(output, map[string]interface{}{
 					"id":        p.ID,
 					"last_seen": p.LastSeen.Format(time.RFC3339),
@@ -67,7 +72,7 @@ func Handler(deps ServerDeps) func(cmd string, logger *log.Logger) CommandRespon
 		case "status":
 			resp := map[string]interface{}{
 				"uptime": Uptime(),
-				"peers":  len(deps.Peers.ListPeers()),
+				"peers":  len(peerList(deps).ListPeers()),
 				"routes": len(deps.Routes.AllRoutes()),
 			}
 			return CommandResponse{Status: "ok", Output: resp}
@@ -87,6 +92,15 @@ func Handler(deps ServerDeps) func(cmd string, logger *log.Logger) CommandRespon
 			return CommandResponse{Status: "error", Error: "unknown command: " + cmd}
 		}
 	}
+}
+
+// peerList returns the liveness tracker when available, otherwise the peer
+// manager's connection list.
+func peerList(deps ServerDeps) PeerLister {
+	if deps.Tracker != nil {
+		return deps.Tracker
+	}
+	return deps.Peers
 }
 
 func handleReload(deps ServerDeps, logger *log.Logger) CommandResponse {
@@ -112,7 +126,7 @@ func handleReload(deps ServerDeps, logger *log.Logger) CommandResponse {
 		}
 		deps.Routes.AddRoute(route)
 
-		for _, p := range deps.Peers.ListPeers() {
+		for _, p := range peerList(deps).ListPeers() {
 			if err := deps.Peers.SendRoute(p.ID, name, route); err != nil {
 				logger.Warnf("Failed to announce route to %s: %v", p.ID, err)
 			}

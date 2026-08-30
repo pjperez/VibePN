@@ -149,8 +149,9 @@ func (s *TOFUStore) verifyPeer(peerName string, rawCerts [][]byte) error {
 }
 
 // ClientTLS builds a client TLS config that presents the local identity and
-// verifies the peer via TOFU.
-func (s *TOFUStore) ClientTLS(certPath, keyPath string) (*tls.Config, error) {
+// verifies the peer via TOFU, pinning under the given peer name so the
+// accept side can reverse-lookup the name from the fingerprint.
+func (s *TOFUStore) ClientTLS(certPath, keyPath, peerName string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("load cert/key: %w", err)
@@ -160,7 +161,7 @@ func (s *TOFUStore) ClientTLS(certPath, keyPath string) (*tls.Config, error) {
 		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: true, //nolint:gosec // identity is verified via TOFU below
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			return s.verifyPeer("", rawCerts)
+			return s.verifyPeer(peerName, rawCerts)
 		},
 		NextProtos: []string{ALPNProtocol},
 	}, nil
@@ -168,11 +169,14 @@ func (s *TOFUStore) ClientTLS(certPath, keyPath string) (*tls.Config, error) {
 
 // ServerTLS wraps a base server TLS config so that peer certificates are
 // verified against the TOFU store. The base config must already have
-// ClientAuth set to RequireAnyClientCert.
-func (s *TOFUStore) ServerTLS(base *tls.Config) *tls.Config {
+// ClientAuth set to RequireAnyClientCert. The peerName is the configured
+// name of the expected peer; when empty, verification still happens but the
+// fingerprint is pinned under the empty name (callers should resolve the
+// name via NameForFingerprint after the handshake).
+func (s *TOFUStore) ServerTLS(base *tls.Config, peerName string) *tls.Config {
 	conf := base.Clone()
 	conf.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		return s.verifyPeer("", rawCerts)
+		return s.verifyPeer(peerName, rawCerts)
 	}
 	return conf
 }

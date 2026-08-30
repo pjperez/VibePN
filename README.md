@@ -55,6 +55,24 @@ Daemon flags:
 Log verbosity is controlled with the `VIBEPN_LOG_LEVEL` environment variable
 (`debug`, `info`, `warn`, `error`).
 
+## End-to-end tests
+
+The repo includes shell-based e2e tests that exercise two real daemons on one
+Linux host (requires /dev/net/tun, root, ip, ping, curl):
+
+`ash
+# Build the binaries, then run the full suite (e2e + resilience):
+go build -o vpn ./cmd/vpn && go build -o vpnctl ./cmd/vpnctl
+sudo VPN=./vpn VPNCTL=./vpnctl scripts/run-all-tests.sh
+`
+
+- scripts/e2e-test.sh — onboarding (init/invite/join/add-peer), peer
+  connection both ways, route learning, real ping across the QUIC tunnel,
+  metrics endpoint, reload, and graceful goodbye.
+- scripts/resilience-test.sh — kills one daemon, verifies the peer is
+  dropped after the liveness timeout, then verifies reconnect and that ping
+  works again.
+
 ## Run as a systemd service
 
 ```bash

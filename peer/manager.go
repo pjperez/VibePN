@@ -150,7 +150,7 @@ func (m *ConnectionManager) dialLoop(peer config.Peer) {
 }
 
 func (m *ConnectionManager) dialOnce(peer config.Peer) (quic.Connection, error) {
-	tlsConf, err := m.tofu.ClientTLS(m.identity.Cert, m.identity.Key)
+	tlsConf, err := m.tofu.ClientTLS(m.identity.Cert, m.identity.Key, peer.Name)
 	if err != nil {
 		return nil, fmt.Errorf("build TLS config: %w", err)
 	}

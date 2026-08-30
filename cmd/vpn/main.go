@@ -63,7 +63,7 @@ func main() {
 	if err != nil {
 		logger.Fatalf("Failed to load TOFU store: %v", err)
 	}
-	tlsConf = tofu.ServerTLS(tlsConf)
+	tlsConf = tofu.ServerTLS(tlsConf, "")
 
 	// Core subsystems.
 	routeTable := netgraph.NewRouteTable()
@@ -72,10 +72,12 @@ func main() {
 
 	registry := peer.NewRegistry(cfg.Identity)
 	registry.SetOnDisconnect(func(peerID string) {
+		tracker.Remove(peerID)
 		routeTable.RemoveByPeer(peerID)
 		metrics.ActivePeers.Set(float64(len(registry.All())))
 	})
-	registry.SetOnConnect(func(_ string, _ gquic.Connection) {
+	registry.SetOnConnect(func(peerID string, _ gquic.Connection) {
+		tracker.MarkAlive(peerID)
 		metrics.ActivePeers.Set(float64(len(registry.All())))
 	})
 
@@ -137,6 +139,7 @@ func main() {
 		ConfigPath: configPath,
 		Routes:     routeTable,
 		Peers:      registry,
+		Tracker:    tracker,
 		IdentityFP: cfg.Identity.Fingerprint,
 		Logger:     logger,
 	}))

@@ -39,6 +39,13 @@ func (t *LivenessTracker) UpdatePeer(peerID string) {
 	t.MarkAlive(peerID)
 }
 
+// Remove drops a peer from the tracker immediately (e.g. on disconnect).
+func (t *LivenessTracker) Remove(peerID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.peers, peerID)
+}
+
 // ListPeers returns a snapshot of tracked peers.
 func (t *LivenessTracker) ListPeers() []shared.PeerState {
 	t.mu.Lock()

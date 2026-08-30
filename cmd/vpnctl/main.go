@@ -25,7 +25,7 @@ import (
 )
 
 // version is the vpnctl release version.
-const version = "0.2.0"
+const version = "0.3.0"
 
 const (
 	defaultSocketPath = "/var/run/vibepn.sock"
@@ -33,6 +33,10 @@ const (
 	defaultCertPath   = "/etc/vibepn/certs/node.crt"
 	defaultKeyPath    = "/etc/vibepn/certs/node.key"
 )
+
+// inviteScheme is the one-line invite token prefix, e.g.
+// vibepn://corp@1.2.3.4:51820#<fingerprint>?name=node-a&prefix=10.42.0.0%2F24
+const inviteScheme = "vibepn://"
 
 type CommandRequest struct {
 	Cmd string `json:"cmd"`
@@ -72,7 +76,7 @@ func main() {
 
 	var err error
 	switch cmd {
-	case "status", "routes", "peers", "reload", "goodbye":
+	case "status", "routes", "peers", "reload", "goodbye", "test", "logs":
 		err = runDaemonCommand(cmd, *jsonMode, args)
 	case "version":
 		fmt.Printf("vpnctl %s\n", version)
@@ -84,6 +88,10 @@ func main() {
 		err = runJoin(args)
 	case "add-peer":
 		err = runAddPeer(args)
+	case "rm-peer":
+		err = runRmPeer(args)
+	case "ls":
+		err = runLs(args)
 	case "doctor":
 		err = runDoctor(args)
 	default:
@@ -99,13 +107,15 @@ func main() {
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage: %s [--json] <command> [options]\n\n", os.Args[0])
 	fmt.Fprintln(os.Stderr, "Daemon control commands:")
-	fmt.Fprintln(os.Stderr, "  status | routes | peers | reload | goodbye")
+	fmt.Fprintln(os.Stderr, "  status | routes | peers | test | reload | goodbye | logs")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Onboarding commands:")
 	fmt.Fprintln(os.Stderr, "  init      Generate cert/key/fingerprint and write config TOML")
-	fmt.Fprintln(os.Stderr, "  invite    Emit JSON invite payload for an exported network")
-	fmt.Fprintln(os.Stderr, "  join      Parse invite payload, generate cert/key, and write config")
+	fmt.Fprintln(os.Stderr, "  invite    Emit JSON invite payload (or one-line token) for an exported network")
+	fmt.Fprintln(os.Stderr, "  join      Parse invite payload/token, generate cert/key, and write config")
 	fmt.Fprintln(os.Stderr, "  add-peer  Append a peer entry to an existing config")
+	fmt.Fprintln(os.Stderr, "  rm-peer   Remove a peer entry from an existing config")
+	fmt.Fprintln(os.Stderr, "  ls        Show configured peers and networks in human form")
 	fmt.Fprintln(os.Stderr, "  doctor    Validate config and identity/peer/network consistency")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Use '<command> -h' for command-specific flags.")
@@ -236,6 +246,7 @@ func runInvite(args []string) error {
 	address := fs.String("address", "", "Inviter reachable address (host:port)")
 	name := fs.String("name", defaultNodeName(), "Inviter name in invite payload")
 	outPath := fs.String("out", "-", "Output file for invite payload ('-' for stdout)")
+	token := fs.Bool("token", false, "Emit a one-line vibepn:// token instead of JSON")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: %s invite [options]\n", os.Args[0])
 		fs.PrintDefaults()
@@ -289,6 +300,22 @@ func runInvite(args []string) error {
 		},
 	}
 
+	if *token {
+		tok := fmt.Sprintf("%s%s@%s#%s?name=%s&prefix=%s",
+			inviteScheme, payload.Network, payload.Inviter.Address,
+			payload.Inviter.Fingerprint, payload.Inviter.Name,
+			urlEncode(payload.Prefix))
+		if *outPath == "-" {
+			fmt.Println(tok)
+			return nil
+		}
+		if err := writeStrictFile(*outPath, []byte(tok+"\n"), 0600); err != nil {
+			return err
+		}
+		fmt.Printf("Wrote invite token to %s\n", *outPath)
+		return nil
+	}
+
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode invite payload: %w", err)
@@ -314,8 +341,8 @@ func runJoin(args []string) error {
 	certPath := fs.String("cert", defaultCertPath, "Path to node certificate to write")
 	keyPath := fs.String("key", defaultKeyPath, "Path to node private key to write")
 	name := fs.String("name", defaultNodeName(), "Node name / certificate common name")
-	inviteJSON := fs.String("invite", "", "Invite payload JSON string")
-	inviteFile := fs.String("invite-file", "", "Path to file containing invite payload JSON")
+	inviteJSON := fs.String("invite", "", "Invite payload JSON string or vibepn:// token")
+	inviteFile := fs.String("invite-file", "", "Path to file containing invite payload JSON or token")
 	address := fs.String("address", "auto", "Local address for invited network (or 'auto')")
 	exportNet := fs.Bool("export", true, "Whether to export invited network")
 	force := fs.Bool("force", false, "Overwrite existing config/cert/key files")
@@ -447,6 +474,105 @@ func runAddPeer(args []string) error {
 	}
 
 	fmt.Printf("Added peer %s to %s\n", *name, *configPath)
+	return nil
+}
+
+func runRmPeer(args []string) error {
+	fs := flag.NewFlagSet("rm-peer", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", defaultConfigPath, "Path to existing config file")
+	name := fs.String("name", "", "Peer name to remove")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: %s rm-peer [options]\n", os.Args[0])
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if *name == "" {
+		return errors.New("--name is required")
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return fmt.Errorf("load config %q: %w", *configPath, err)
+	}
+
+	found := false
+	updated := cfg.Peers[:0]
+	for _, peer := range cfg.Peers {
+		if peer.Name == *name {
+			found = true
+			continue
+		}
+		updated = append(updated, peer)
+	}
+	if !found {
+		return fmt.Errorf("peer %q not found in config", *name)
+	}
+	cfg.Peers = updated
+
+	if err := config.Write(*configPath, cfg); err != nil {
+		return err
+	}
+
+	fmt.Printf("Removed peer %s from %s\n", *name, *configPath)
+	return nil
+}
+
+func runLs(args []string) error {
+	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", defaultConfigPath, "Path to existing config file")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: %s ls [options]\n", os.Args[0])
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return fmt.Errorf("load config %q: %w", *configPath, err)
+	}
+
+	fmt.Printf("Node: %s\n", cfg.Identity.Fingerprint[:12])
+	fmt.Printf("Networks:\n")
+	for name, netCfg := range cfg.Networks {
+		export := "no"
+		if netCfg.Export {
+			export = "yes"
+		}
+		fmt.Printf("  %-12s prefix=%-18s address=%-15s export=%s\n",
+			name, netCfg.Prefix, netCfg.Address, export)
+	}
+	fmt.Printf("Peers:\n")
+	if len(cfg.Peers) == 0 {
+		fmt.Printf("  (none)\n")
+	}
+	for _, peer := range cfg.Peers {
+		fp := peer.Fingerprint
+		if fp == "" {
+			fp = "(tofu)"
+		} else if len(fp) > 12 {
+			fp = fp[:12] + "..."
+		}
+		fmt.Printf("  %-12s address=%-22s fp=%-16s networks=%s\n",
+			peer.Name, peer.Address, fp, strings.Join(peer.Networks, ","))
+	}
 	return nil
 }
 
@@ -667,6 +793,13 @@ func loadInvitePayload(inviteJSON, inviteFile string) (InvitePayload, error) {
 		raw = []byte(inviteJSON)
 	}
 
+	raw = []byte(strings.TrimSpace(string(raw)))
+
+	// One-line token: vibepn://network@host:port#fingerprint?name=...&prefix=...
+	if strings.HasPrefix(string(raw), inviteScheme) {
+		return parseInviteToken(string(raw))
+	}
+
 	var payload InvitePayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return InvitePayload{}, fmt.Errorf("parse invite payload: %w", err)
@@ -696,6 +829,103 @@ func loadInvitePayload(inviteJSON, inviteFile string) (InvitePayload, error) {
 		return InvitePayload{}, errors.New("invite payload has invalid inviter.fingerprint (must be 64 hex chars)")
 	}
 	return payload, nil
+}
+
+// parseInviteToken parses a one-line vibepn:// token into an InvitePayload.
+// Format: vibepn://network@host:port#fingerprint?name=inviter&prefix=10.42.0.0%2F24
+func parseInviteToken(token string) (InvitePayload, error) {
+	rest := strings.TrimPrefix(token, inviteScheme)
+
+	// Split off query (name=..., prefix=...).
+	name := ""
+	prefix := ""
+	if idx := strings.IndexByte(rest, '?'); idx >= 0 {
+		query := rest[idx+1:]
+		rest = rest[:idx]
+		for _, kv := range strings.Split(query, "&") {
+			parts := strings.SplitN(kv, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			switch parts[0] {
+			case "name":
+				name = parts[1]
+			case "prefix":
+				prefix = urlDecode(parts[1])
+			}
+		}
+	}
+
+	// Split network@address#fingerprint.
+	atIdx := strings.IndexByte(rest, '@')
+	hashIdx := strings.IndexByte(rest, '#')
+	if atIdx <= 0 || hashIdx <= atIdx+1 {
+		return InvitePayload{}, errors.New("invalid invite token: expected vibepn://network@host:port#fingerprint[?name=...&prefix=...]")
+	}
+
+	network := rest[:atIdx]
+	address := rest[atIdx+1 : hashIdx]
+	fingerprint := rest[hashIdx+1:]
+
+	if network == "" {
+		return InvitePayload{}, errors.New("invite token missing network")
+	}
+	if err := validateHostPort(address); err != nil {
+		return InvitePayload{}, fmt.Errorf("invite token has invalid address %q: %w", address, err)
+	}
+	if !isValidFingerprint(fingerprint) {
+		return InvitePayload{}, errors.New("invite token has invalid fingerprint (must be 64 hex chars)")
+	}
+	if name == "" {
+		return InvitePayload{}, errors.New("invite token missing ?name= (inviter name)")
+	}
+	if prefix == "" {
+		return InvitePayload{}, errors.New("invite token missing ?prefix= (network prefix)")
+	}
+	if _, _, err := net.ParseCIDR(prefix); err != nil {
+		return InvitePayload{}, fmt.Errorf("invite token has invalid prefix %q: %w", prefix, err)
+	}
+
+	return InvitePayload{
+		Version: 1,
+		Network: network,
+		Prefix:  prefix,
+		Inviter: InvitePeer{
+			Name:        name,
+			Address:     address,
+			Fingerprint: fingerprint,
+		},
+	}, nil
+}
+
+// urlEncode percent-encodes a CIDR so the "/" in "10.42.0.0/24" survives
+// shell copy/paste of the token.
+func urlEncode(s string) string {
+	var b strings.Builder
+	for _, c := range []byte(s) {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '.' || c == '-' || c == '_' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
+}
+
+func urlDecode(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 func generateIdentity(certPath, keyPath, commonName string) (string, error) {
@@ -827,6 +1057,22 @@ func printOutput(cmd string, output interface{}) {
 			r := item.(map[string]interface{})
 			fmt.Printf("Net: %-10s Prefix: %-18s Peer: %-16s Metric: %v Expires: %s\n",
 				r["network"], r["prefix"], r["peer"], r["metric"], r["expires"])
+		}
+	case "test":
+		results, _ := output.(map[string]interface{})["results"].([]interface{})
+		for _, item := range results {
+			r := item.(map[string]interface{})
+			if ok, _ := r["ok"].(bool); ok {
+				fmt.Printf("Peer %s: OK (%.2f ms)\n", r["peer"], r["latency_ms"])
+			} else {
+				fmt.Printf("Peer %s: FAIL (%v)\n", r["peer"], r["error"])
+			}
+		}
+	case "logs":
+		m, _ := output.(map[string]interface{})
+		logs, _ := m["logs"].([]interface{})
+		for _, line := range logs {
+			fmt.Println(line)
 		}
 	default:
 		fmt.Println("OK")

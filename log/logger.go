@@ -79,6 +79,41 @@ func levelName(l Level) string {
 	return "?"
 }
 
+// ring is a small thread-safe in-memory log buffer used by `vpnctl logs`.
+type ring struct {
+	mu    sync.Mutex
+	lines []string
+	max   int
+}
+
+var logRing = &ring{max: 500}
+
+func (r *ring) add(line string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, line)
+	if len(r.lines) > r.max {
+		r.lines = r.lines[len(r.lines)-r.max:]
+	}
+}
+
+func (r *ring) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.lines))
+	copy(out, r.lines)
+	return out
+}
+
+// RecentLogs returns the last N buffered log lines (for `vpnctl logs`).
+func RecentLogs(n int) []string {
+	lines := logRing.snapshot()
+	if n > 0 && len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
+}
+
 // Logger emits timestamped, level-tagged lines tagged with a component name.
 type Logger struct {
 	component string
@@ -99,7 +134,9 @@ func (l *Logger) logf(lvl Level, format string, args ...interface{}) {
 	}
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 	message := fmt.Sprintf(format, args...)
-	l.logger.Printf("[%s] %s  [%s] %s", timestamp, levelName(lvl), l.component, message)
+	line := fmt.Sprintf("[%s] %s  [%s] %s", timestamp, levelName(lvl), l.component, message)
+	l.logger.Println(line)
+	logRing.add(line)
 }
 
 func (l *Logger) Debugf(format string, args ...interface{}) { l.logf(DebugLevel, format, args...) }

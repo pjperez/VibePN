@@ -7,8 +7,6 @@ import (
 	"vibepn/log"
 	"vibepn/metrics"
 	"vibepn/tun"
-
-	"github.com/quic-go/quic-go"
 )
 
 // Inbound decodes framed packets from raw QUIC streams and writes them into
@@ -26,14 +24,14 @@ func NewInbound(devices map[string]*tun.Device) *Inbound {
 }
 
 // HandleRawStream reads frames until the stream closes.
-func (i *Inbound) HandleRawStream(stream quic.Stream) {
+func (i *Inbound) HandleRawStream(stream io.Reader) {
 	for {
 		network, pkt, err := readFrame(stream)
 		if err != nil {
 			if err == io.EOF {
-				i.logger.Infof("Raw stream %d closed", stream.StreamID())
+				i.logger.Infof("Raw stream closed")
 			} else {
-				i.logger.Warnf("Raw stream %d error: %v", stream.StreamID(), err)
+				i.logger.Warnf("Raw stream error: %v", err)
 				metrics.PacketsDropped.WithLabelValues("frame_error").Inc()
 			}
 			return

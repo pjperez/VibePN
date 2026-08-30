@@ -28,14 +28,20 @@ trap cleanup EXIT
 step "Onboarding node A"
 "$VPNCTL" init -config "$A/config.toml" -cert "$A/node.crt" -key "$A/node.key" \
   -name node-a -network corp -prefix 10.42.0.0/24 -address auto >/dev/null
-"$VPNCTL" invite -config "$A/config.toml" -network corp -address 127.0.0.1:51820 \
-  -name node-a -out "$A/invite.json" >/dev/null
 FP_A=$(grep -m1 fingerprint "$A/config.toml" | awk '{print $3}' | tr -d '"')
 ok "node A fingerprint ${FP_A:0:12}..."
 
-step "Onboarding node B (join via invite)"
+step "Invite node B via one-line token"
+TOKEN=$("$VPNCTL" invite -config "$A/config.toml" -network corp -address 127.0.0.1:51820 \
+  -name node-a -token)
+case "$TOKEN" in
+  vibepn://*) ok "token: ${TOKEN:0:40}..." ;;
+  *) bad "unexpected token format: $TOKEN" ;;
+esac
+
+step "Onboard node B (join via token)"
 "$VPNCTL" join -config "$B/config.toml" -cert "$B/node.crt" -key "$B/node.key" \
-  -name node-b -invite-file "$A/invite.json" -address auto >/dev/null
+  -name node-b -invite "$TOKEN" -address auto >/dev/null
 FP_B=$(grep -m1 fingerprint "$B/config.toml" | awk '{print $3}' | tr -d '"')
 ok "node B fingerprint ${FP_B:0:12}..."
 
@@ -43,6 +49,16 @@ step "Add node B as peer of node A"
 "$VPNCTL" add-peer -config "$A/config.toml" -name node-b -address 127.0.0.1:51821 \
   -fingerprint "$FP_B" -networks corp >/dev/null
 ok "peer added"
+
+step "ls shows configured peers and networks"
+LS_A=$("$VPNCTL" ls -config "$A/config.toml")
+echo "$LS_A" | grep -q "node-b" && ok "ls shows node-b" || bad "ls missing node-b"
+echo "$LS_A" | grep -q "corp" && ok "ls shows corp network" || bad "ls missing corp"
+
+step "rm-peer then re-add (round-trip)"
+"$VPNCTL" rm-peer -config "$A/config.toml" -name node-b >/dev/null && ok "rm-peer removed node-b" || bad "rm-peer failed"
+"$VPNCTL" add-peer -config "$A/config.toml" -name node-b -address 127.0.0.1:51821 \
+  -fingerprint "$FP_B" -networks corp >/dev/null && ok "re-added node-b" || bad "re-add failed"
 
 step "Validate both configs"
 "$VPNCTL" doctor -config "$A/config.toml" >/dev/null && ok "doctor A" || bad "doctor A"
@@ -81,6 +97,20 @@ RA=$("$VPNCTL" routes -socket "$A/vibepn.sock" 2>/dev/null | grep -c "10.42.0.0/
 RB=$("$VPNCTL" routes -socket "$B/vibepn.sock" 2>/dev/null | grep -c "10.42.0.0/24" || true)
 [ "$RA" -ge 1 ] && ok "A has route 10.42.0.0/24" || bad "A missing route ($("$VPNCTL" routes -socket "$A/vibepn.sock" 2>&1))"
 [ "$RB" -ge 1 ] && ok "B has route 10.42.0.0/24" || bad "B missing route ($("$VPNCTL" routes -socket "$B/vibepn.sock" 2>&1))"
+
+step "vpnctl test (latency probe)"
+sleep 3  # let connection churn settle
+TEST_OUT=""
+for i in $(seq 1 5); do
+  TEST_OUT=$("$VPNCTL" test -socket "$A/vibepn.sock" 2>&1)
+  if echo "$TEST_OUT" | grep -q "OK"; then break; fi
+  sleep 1
+done
+echo "$TEST_OUT" | grep -q "OK" && ok "test OK: $TEST_OUT" || bad "test failed: $TEST_OUT"
+
+step "vpnctl logs"
+LOGS=$("$VPNCTL" logs -socket "$A/vibepn.sock" 2>&1)
+echo "$LOGS" | grep -q "VibePN started" && ok "logs contain startup line" || bad "logs missing startup line"
 
 step "Resolve auto addresses"
 ADDR_A=$(ip -o addr show 2>/dev/null | awk '/10\.42\./{print $4}' | head -1 | cut -d/ -f1 || true)

@@ -1,4 +1,3 @@
-// Package quic: QUIC listener and session handling.
 package quic
 
 import (
@@ -78,8 +77,8 @@ func AcceptLoop(
 }
 
 // handleSession drives one accepted connection: it accepts the control stream,
-// performs the hello exchange, announces local routes, and then forwards raw
-// streams to the inbound handler.
+// performs the hello exchange, announces local routes, and then classifies
+// every further stream as control or raw by peeking at its first byte.
 func handleSession(sess quic.Connection, inbound *forward.Inbound, peerID string) {
 	logger := log.New("quic/session")
 
@@ -106,15 +105,8 @@ func handleSession(sess quic.Connection, inbound *forward.Inbound, peerID string
 	defer stopKeepalive()
 	go peer.HandleControlStream(sess, controlStream, peerID)
 
-	// Accept raw packet streams.
-	for {
-		stream, err := sess.AcceptStream(context.Background())
-		if err != nil {
-			logger.Warnf("Stream accept error from %s: %v", peerID, err)
-			return
-		}
-		go inbound.HandleRawStream(stream)
-	}
+	// Accept further streams; classify them by peeking at the first byte.
+	peer.AcceptStreams(sess, peerID, inbound.HandleRawStream)
 }
 
 // announceRoutes sends route announcements for exported networks.

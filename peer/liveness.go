@@ -27,8 +27,13 @@ func NewLivenessTracker(timeout time.Duration) *LivenessTracker {
 	}
 }
 
-// MarkAlive records that a peer was seen now.
+// MarkAlive records that a peer was seen now. Empty peer IDs are ignored
+// (they are transient artifacts of connection churn before identity
+// resolution completes).
 func (t *LivenessTracker) MarkAlive(id string) {
+	if id == "" {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.peers[id] = shared.PeerState{ID: id, LastSeen: time.Now()}
@@ -53,6 +58,9 @@ func (t *LivenessTracker) ListPeers() []shared.PeerState {
 
 	out := make([]shared.PeerState, 0, len(t.peers))
 	for _, p := range t.peers {
+		if p.ID == "" {
+			continue
+		}
 		out = append(out, p)
 	}
 	return out
@@ -81,6 +89,9 @@ func (t *LivenessTracker) StartWatcher(rt *netgraph.RouteTable) {
 			now := time.Now()
 			var expired []string
 			for id, peer := range t.peers {
+				if id == "" {
+					continue
+				}
 				if now.Sub(peer.LastSeen) > t.timeout {
 					expired = append(expired, id)
 				}

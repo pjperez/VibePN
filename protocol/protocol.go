@@ -15,6 +15,8 @@ const (
 	TypeRouteWithdraw byte = 'W'
 	TypeKeepalive     byte = 'K'
 	TypeGoodbye       byte = 'G'
+	TypePing          byte = 'P'
+	TypePong          byte = 'p'
 )
 
 // MaxMessageSize bounds control message payloads (2-byte length field).
@@ -45,6 +47,17 @@ type Keepalive struct {
 
 // Goodbye is a graceful shutdown signal.
 type Goodbye struct{}
+
+// Ping is a latency probe; the peer must reply with a Pong carrying the same
+// nonce.
+type Ping struct {
+	Nonce uint64
+}
+
+// Pong is the response to a Ping.
+type Pong struct {
+	Nonce uint64
+}
 
 // Encode serializes a message into its wire payload (type byte + body).
 func Encode(msg interface{}) ([]byte, error) {
@@ -98,6 +111,18 @@ func Encode(msg interface{}) ([]byte, error) {
 	case Goodbye:
 		return []byte{TypeGoodbye}, nil
 
+	case Ping:
+		buf := make([]byte, 1+8)
+		buf[0] = TypePing
+		binary.BigEndian.PutUint64(buf[1:], m.Nonce)
+		return buf, nil
+
+	case Pong:
+		buf := make([]byte, 1+8)
+		buf[0] = TypePong
+		binary.BigEndian.PutUint64(buf[1:], m.Nonce)
+		return buf, nil
+
 	default:
 		return nil, fmt.Errorf("cannot encode message of type %T", msg)
 	}
@@ -136,6 +161,18 @@ func Decode(payload []byte) (interface{}, error) {
 			return nil, fmt.Errorf("goodbye body must be empty, got %d bytes", len(body))
 		}
 		return Goodbye{}, nil
+
+	case TypePing:
+		if len(body) != 8 {
+			return nil, fmt.Errorf("ping body must be 8 bytes, got %d", len(body))
+		}
+		return Ping{Nonce: binary.BigEndian.Uint64(body)}, nil
+
+	case TypePong:
+		if len(body) != 8 {
+			return nil, fmt.Errorf("pong body must be 8 bytes, got %d", len(body))
+		}
+		return Pong{Nonce: binary.BigEndian.Uint64(body)}, nil
 
 	default:
 		return nil, fmt.Errorf("unknown message type %q", typ)

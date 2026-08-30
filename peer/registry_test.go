@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -130,6 +131,7 @@ func TestConnectionManagerReconcileAndStop(t *testing.T) {
 		tofu,
 		config.Identity{Cert: "/nonexistent.crt", Key: "/nonexistent.key"},
 		func() map[string]config.NetworkConfig { return nil },
+		func(io.Reader) {},
 	)
 
 	// Reconcile with an unreachable peer; the dial loop should keep retrying

@@ -109,15 +109,6 @@ func main() {
 
 	peer.RegisterControl(routeTable, tracker, policy)
 
-	// Connection manager (outbound dialing with reconnect + backoff).
-	connMgr := peer.NewConnectionManager(
-		registry,
-		tofu,
-		cfg.Identity,
-		func() map[string]config.NetworkConfig { return cfg.Networks },
-	)
-	connMgr.Start(cfg.Peers)
-
 	// Interfaces.
 	ifaceMgr, err := iface.Init(cfg.Networks, cfg.Identity.Fingerprint)
 	if err != nil {
@@ -131,6 +122,16 @@ func main() {
 	}
 	inbound := forward.NewInbound(ifaceMgr.Devices)
 
+	// Connection manager (outbound dialing with reconnect + backoff).
+	connMgr := peer.NewConnectionManager(
+		registry,
+		tofu,
+		cfg.Identity,
+		func() map[string]config.NetworkConfig { return cfg.Networks },
+		inbound.HandleRawStream,
+	)
+	connMgr.Start(cfg.Peers)
+
 	// Auxiliary servers.
 	go metrics.Serve(metricsAddr)
 	quic.SetNetConfig(cfg.Networks)
@@ -140,6 +141,7 @@ func main() {
 		Routes:     routeTable,
 		Peers:      registry,
 		Tracker:    tracker,
+		Prober:     &control.ProbePeer{GetConn: registry.Get},
 		IdentityFP: cfg.Identity.Fingerprint,
 		Logger:     logger,
 	}))

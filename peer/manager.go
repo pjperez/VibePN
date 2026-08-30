@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"sync"
 	"time"
@@ -36,11 +37,12 @@ func generateNonce() (uint64, error) {
 // ConnectionManager dials configured peers and maintains one connection per
 // peer with exponential backoff and jitter.
 type ConnectionManager struct {
-	logger   *log.Logger
-	registry *Registry
-	tofu     *crypto.TOFUStore
-	identity config.Identity
-	netcfg   func() map[string]config.NetworkConfig
+	logger    *log.Logger
+	registry  *Registry
+	tofu      *crypto.TOFUStore
+	identity  config.Identity
+	netcfg    func() map[string]config.NetworkConfig
+	handleRaw func(io.Reader)
 
 	mu          sync.Mutex
 	peerConfigs map[string]config.Peer // name → config (peers with active dial loops)
@@ -56,6 +58,7 @@ func NewConnectionManager(
 	tofu *crypto.TOFUStore,
 	identity config.Identity,
 	netcfg func() map[string]config.NetworkConfig,
+	handleRaw func(io.Reader),
 ) *ConnectionManager {
 	return &ConnectionManager{
 		logger:      log.New("peer/manager"),
@@ -63,6 +66,7 @@ func NewConnectionManager(
 		tofu:        tofu,
 		identity:    identity,
 		netcfg:      netcfg,
+		handleRaw:   handleRaw,
 		peerConfigs: make(map[string]config.Peer),
 		stop:        make(chan struct{}),
 	}
@@ -197,8 +201,11 @@ func (m *ConnectionManager) runSession(peer config.Peer, conn quic.Connection) {
 	// Start the keepalive writer and the control reader.
 	stopKeepalive := StartKeepaliveLoop(stream)
 	defer stopKeepalive()
+	go HandleControlStream(conn, stream, peer.Name)
 
-	HandleControlStream(conn, stream, peer.Name)
+	// The dialer side must also accept streams: when this connection wins the
+	// tie-break, remote probes and packet streams arrive on it.
+	AcceptStreams(conn, peer.Name, m.handleRaw)
 
 	// Block until the connection ends so the dial loop can reconnect.
 	<-conn.Context().Done()

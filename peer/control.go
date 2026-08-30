@@ -2,6 +2,7 @@ package peer
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -65,7 +66,7 @@ func (p *ConfigRoutePolicy) Allow(peerID, network, prefix string) error {
 
 // HandleControlStream reads and processes control messages from a peer until
 // the stream or connection closes.
-func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string) {
+func HandleControlStream(conn quic.Connection, stream io.ReadWriter, peerID string) {
 	logger := log.New("peer/control")
 
 	for {
@@ -92,6 +93,16 @@ func HandleControlStream(conn quic.Connection, stream quic.Stream, peerID string
 			if tracker := GetPeerTracker(); tracker != nil {
 				tracker.UpdatePeer(peerID)
 			}
+
+		case protocol.Ping:
+			// Reply with a Pong carrying the same nonce.
+			if err := protocol.WriteMessage(stream, protocol.Pong{Nonce: m.Nonce}); err != nil {
+				logger.Warnf("Failed to send Pong to %s: %v", peerID, err)
+			}
+
+		case protocol.Pong:
+			// Latency probes are handled by the caller (vpnctl test);
+			// nothing to do here.
 
 		case protocol.Goodbye:
 			logger.Infof("Received Goodbye from %s", peerID)

@@ -66,10 +66,10 @@ go build -o vpn ./cmd/vpn && go build -o vpnctl ./cmd/vpnctl
 sudo VPN=./vpn VPNCTL=./vpnctl scripts/run-all-tests.sh
 `
 
-- scripts/e2e-test.sh — onboarding (init/invite/join/add-peer), peer
+- scripts/e2e-test.sh ï¿½ onboarding (init/invite/join/add-peer), peer
   connection both ways, route learning, real ping across the QUIC tunnel,
   metrics endpoint, reload, and graceful goodbye.
-- scripts/resilience-test.sh — kills one daemon, verifies the peer is
+- scripts/resilience-test.sh ï¿½ kills one daemon, verifies the peer is
   dropped after the liveness timeout, then verifies reconnect and that ping
   works again.
 
@@ -101,6 +101,8 @@ Control CLI (via Unix socket):
 ./vpnctl status
 ./vpnctl peers
 ./vpnctl routes
+./vpnctl test          # ping every live peer (latency)
+./vpnctl logs          # tail the daemon log
 ./vpnctl reload
 ./vpnctl goodbye
 ./vpnctl --json status
@@ -111,8 +113,12 @@ Onboarding helpers:
 ```bash
 ./vpnctl init -config /etc/vibepn/config.toml
 ./vpnctl invite -config /etc/vibepn/config.toml -network corp -address 198.51.100.20:51820
+./vpnctl invite -config /etc/vibepn/config.toml -network corp -address 198.51.100.20:51820 -token   # one-line vibepn:// token
 ./vpnctl join -config /etc/vibepn/config.toml -invite-file invite.json
+./vpnctl join -config /etc/vibepn/config.toml -invite 'vibepn://corp@198.51.100.20:51820#<fp>?name=peer1&prefix=10.42.0.0%2F24'
 ./vpnctl add-peer -config /etc/vibepn/config.toml -name node3 -address 203.0.113.9:51820 -fingerprint <sha256> -networks corp
+./vpnctl rm-peer -config /etc/vibepn/config.toml -name node3
+./vpnctl ls -config /etc/vibepn/config.toml
 ./vpnctl doctor -config /etc/vibepn/config.toml
 ```
 
